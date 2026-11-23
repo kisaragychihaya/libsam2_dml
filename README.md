@@ -151,6 +151,7 @@ exe. Model paths default to the repo root; DLL/model paths can be overridden:
 | `SAM2_DECODER` | decoder ONNX | same |
 | `SAM2_DEVICE` | DirectML adapter index | `0` |
 | `SAM2_RUNS` | timed iterations per stage | `5` |
+| `SAM2_ALLOW_CPU` | continue with a warning instead of failing when DirectML is unavailable | unset (non-DML is a failure) |
 | `SAM2_MODEL_DIR` | where `run_qc.sh`/`crosscheck.sh` look for the models | repo root |
 
 The QC binary takes one image and writes into the current directory:
@@ -216,12 +217,20 @@ downloads both models (URLs are inputs, defaults point at this repo's `v0.1.0` a
 the synthetic image, runs the QC pass, asserts `DmlExecutionProvider`, then runs `ref_dump.py` +
 `compare.py` with `atol=1e-3` (a failing comparison fails the job) and uploads the DLLs, exe, logs
 and mask PNG as an artifact. Inputs: `encoder_url`, `decoder_url`, `runs` (default 2), `require_dml`
-(default true — a DirectML fallback to CPU fails the job rather than silently passing).
+(default true — a DirectML fallback to CPU fails the job rather than silently passing). Before the QC
+pass it inventories the runner's display adapters and probes `SAM2_DEVICE=0..3`, so a DirectML device
+reachable only at another adapter index is still found.
 
 Latest manual run: <!-- QC-RUN-URL -->
 
-GitHub's hosted runners have no discrete GPU; DirectML falls back to the WARP software adapter
-there. The provider string is still `DmlExecutionProvider`, only much slower.
+GitHub's hosted runners have no discrete GPU. DirectML is *supposed* to fall back to the WARP
+software adapter there (still reported as `DmlExecutionProvider`, only much slower) — but the
+`windows-latest` image exposes no D3D12-capable adapter to DXGI, so DirectML device creation fails
+with `Specified display adapter handle is invalid`. That is an environment limit, not a library
+bug: the DLL then reports `CPUExecutionProvider`, keeps the DirectML failure in
+`sam2_get_last_error()`, and the QC job fails while `require_dml=true`. Running the workflow with
+`require_dml=false` keeps the numerical cross-check alive on CPU through `SAM2_ALLOW_CPU=1`, and the
+log always states which provider actually ran.
 
 ## Known caveats
 

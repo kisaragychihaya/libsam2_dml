@@ -13,6 +13,8 @@
 //	SAM2_DECODER   absolute path of sam2_hiera_small.decoder.onnx
 //	SAM2_DEVICE    DirectML adapter index (default 0)
 //	SAM2_RUNS      timed iterations per stage (default 5)
+//	SAM2_ALLOW_CPU continue (with a warning) instead of failing when DirectML is
+//	                unavailable and the DLL fell back to CPUExecutionProvider
 //
 // Artifacts written to the current directory:
 //
@@ -456,6 +458,7 @@ func run() error {
 		deviceID = v
 	}
 	runs := timedRuns()
+	allowCPU := truthy(os.Getenv("SAM2_ALLOW_CPU"))
 
 	for _, p := range []string{imagePath, encoderPath, decoderPath} {
 		if _, statErr := os.Stat(p); statErr != nil {
@@ -503,7 +506,10 @@ func run() error {
 		fmt.Printf("encoder note     : %s\n", msg)
 	}
 	if !containsFold(encProvider, "Dml") {
-		return fmt.Errorf("encoder is NOT running on DirectML (provider=%q)", encProvider)
+		if !allowCPU {
+			return fmt.Errorf("encoder is NOT running on DirectML (provider=%q)", encProvider)
+		}
+		fmt.Printf("WARNING          : encoder is not on DirectML (SAM2_ALLOW_CPU=1), timings below are CPU numbers\n")
 	}
 
 	// Encoder: 1 warmup + `runs` timed calls. The last embedding is kept for the
@@ -563,7 +569,10 @@ func run() error {
 	decProvider := lib.providerString(lib.decoderProvider, decHandle)
 	fmt.Printf("decoder provider : %s\n", decProvider)
 	if !containsFold(decProvider, "Dml") {
-		return fmt.Errorf("decoder is NOT running on DirectML (provider=%q)", decProvider)
+		if !allowCPU {
+			return fmt.Errorf("decoder is NOT running on DirectML (provider=%q)", decProvider)
+		}
+		fmt.Printf("WARNING          : decoder is not on DirectML (SAM2_ALLOW_CPU=1), timings below are CPU numbers\n")
 	}
 
 	// Single positive prompt at the image center, in original pixel coordinates.
@@ -667,6 +676,15 @@ func valueOr(env, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// truthy parses the 1/true/yes forms used by the environment overrides.
+func truthy(s string) bool {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
 }
 
 func containsFold(s, sub string) bool {

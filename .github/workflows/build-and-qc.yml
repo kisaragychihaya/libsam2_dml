@@ -95,21 +95,75 @@ jobs:
           ./bin/sam2qc.exe --gen-test-image example/out/test_image.png
           if ($LASTEXITCODE -ne 0) { throw "test image generation failed" }
 
+      - name: Inventory display adapters
+        shell: pwsh
+        run: |
+          Get-CimInstance Win32_VideoController |
+            Select-Object Name, Status, DriverVersion, AdapterCompatibility | Format-List
+
+      # Hosted runners have no GPU. DirectML can still run on the WARP software
+      # adapter, but only if the adapter ORT enumerates at the requested
+      # device_id is D3D12-capable. Probe the first four ids and export whichever
+      # one reports DmlExecutionProvider for the real QC pass below.
+      - name: Probe DirectML adapter ids
+        shell: pwsh
+        env:
+          SAM2_DLL: ${{ github.workspace }}\bin\sam2_dml.dll
+          SAM2_ENCODER: ${{ github.workspace }}\models\sam2_hiera_small.encoder.onnx
+          SAM2_DECODER: ${{ github.workspace }}\models\sam2_hiera_small.decoder.onnx
+          SAM2_RUNS: "1"
+        run: |
+          $picked = $null
+          foreach ($d in 0..3) {
+            $env:SAM2_DEVICE = "$d"
+            Push-Location example/out
+            & "$env:GITHUB_WORKSPACE\bin\sam2qc.exe" test_image.png *> "probe_$d.log"
+            $rc = $LASTEXITCODE
+            Pop-Location
+            $prov = (Select-String -Path "example/out/probe_$d.log" -Pattern '^encoder provider' |
+                     Select-Object -First 1).Line
+            $note = (Select-String -Path "example/out/probe_$d.log" -Pattern '^encoder note' |
+                     Select-Object -First 1).Line
+            Write-Host "SAM2_DEVICE=$d exit=$rc  $prov"
+            if ($note) { Write-Host "                $note" }
+            if ($prov -match 'Dml') { $picked = $d; break }
+          }
+          if ($null -ne $picked) {
+            Write-Host "DirectML available at device_id=$picked"
+            "SAM2_DEVICE=$picked" | Add-Content -Path $env:GITHUB_ENV
+          } else {
+            Write-Host "::warning::No DirectML device id in 0..3 initialized; the QC pass will run on the CPU provider and fail while require_dml=true."
+          }
+
       - name: Run QC (pure-Go FFI -> sam2_dml.dll)
         shell: pwsh
         env:
           SAM2_DLL: ${{ github.workspace }}\bin\sam2_dml.dll
           SAM2_ENCODER: ${{ github.workspace }}\models\sam2_hiera_small.encoder.onnx
           SAM2_DECODER: ${{ github.workspace }}\models\sam2_hiera_small.decoder.onnx
-          SAM2_DEVICE: "0"
           SAM2_RUNS: ${{ inputs.runs }}
         run: |
+          $device = if ($env:SAM2_DEVICE) { $env:SAM2_DEVICE } else { "0" }
+          $requireDml = "${{ inputs.require_dml }}"
+          Write-Host "SAM2_DEVICE=$device (require_dml=$requireDml)"
+          if ($requireDml -ne "true") {
+            # Explicit, logged escape hatch: keep the numerical cross-check
+            # running even when DirectML is unavailable. Never used by default.
+            Write-Host "::warning::require_dml=false - setting SAM2_ALLOW_CPU=1; a CPU fallback will NOT be treated as DirectML"
+            $env:SAM2_ALLOW_CPU = "1"
+          }
           Push-Location example/out
           & "$env:GITHUB_WORKSPACE\bin\sam2qc.exe" test_image.png *> qc_output.log
           $rc = $LASTEXITCODE
           Pop-Location
           Get-Content example/out/qc_output.log
-          if ($rc -ne 0) { throw "sam2qc.exe exited with $rc" }
+          # sam2qc.exe fails on its own when the provider is not DirectML, so a
+          # CPU fallback can never pass as DirectML; require_dml=false only
+          # downgrades that specific check to a warning.
+          if ($rc -ne 0 -and $requireDml -eq "true") { throw "sam2qc.exe exited with $rc" }
+          if ($rc -ne 0) {
+            Write-Host "::warning::sam2qc.exe exited with $rc but require_dml=false, continuing to the numerical cross-check"
+          }
 
       - name: Assert DirectML provider
         shell: pwsh
