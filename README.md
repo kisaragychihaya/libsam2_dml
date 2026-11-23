@@ -221,16 +221,34 @@ and mask PNG as an artifact. Inputs: `encoder_url`, `decoder_url`, `runs` (defau
 pass it inventories the runner's display adapters and probes `SAM2_DEVICE=0..3`, so a DirectML device
 reachable only at another adapter index is still found.
 
-Latest manual run: <!-- QC-RUN-URL -->
+About the WARP case: hosted runners have no GPU, and DirectML is *supposed* to fall back to the WARP
+software adapter there (which would still report `DmlExecutionProvider`, just slower). On the
+`windows-latest` image it cannot: the only display controller is `Microsoft Hyper-V Video`, which has
+no D3D12 support, so DirectML device creation fails with `Specified display adapter handle is
+invalid` for every adapter index. That is an environment limit, not a library bug — the DLL reports
+`CPUExecutionProvider`, keeps the DirectML failure text in `sam2_get_last_error()`, and the job fails
+while `require_dml=true`. `require_dml=false` keeps the numerical cross-check alive on CPU
+(`SAM2_ALLOW_CPU=1`) and the log always states which provider actually ran.
 
-GitHub's hosted runners have no discrete GPU. DirectML is *supposed* to fall back to the WARP
-software adapter there (still reported as `DmlExecutionProvider`, only much slower) — but the
-`windows-latest` image exposes no D3D12-capable adapter to DXGI, so DirectML device creation fails
-with `Specified display adapter handle is invalid`. That is an environment limit, not a library
-bug: the DLL then reports `CPUExecutionProvider`, keeps the DirectML failure in
-`sam2_get_last_error()`, and the QC job fails while `require_dml=true`. Running the workflow with
-`require_dml=false` keeps the numerical cross-check alive on CPU through `SAM2_ALLOW_CPU=1`, and the
-log always states which provider actually ran.
+Latest manual run:
+**[run 45179978766](https://github.com/kisaragychihaya/libsam2_dml/actions/runs/45179978766) — success,
+all 18 steps green**, artifact `sam2_dml-win-x64-qc`. What it actually measured:
+
+| Item | Result of that run |
+| --- | --- |
+| ORT-DML fetch, MSVC/CMake/Ninja build, `CGO_ENABLED=0` go build | green |
+| models (175 MB) downloaded from this repo's `v0.1.0` assets | green |
+| adapter probe `SAM2_DEVICE=0..3` | all CPU: `C0262002 Specified display adapter handle is invalid` |
+| encoder / decoder provider | `CPUExecutionProvider` (loud `WARNING` in the log, `require_dml=false`) |
+| encode min/avg/max | 1497 / 1508 / 1519 ms (CPU, NOT DirectML) |
+| decode min/avg/max | 37.9 / 45.6 / 53.3 ms (CPU, NOT DirectML) |
+| Go vs Python logits, same pixels (`atol=1e-3`) | max abs diff **0.000e+00**, binary IoU **1.000000**, PASS |
+| Go vs Python logits, same PNG (`atol=1e-3`) | max abs diff **0.000e+00**, binary IoU **1.000000**, PASS |
+
+The same workflow with the default `require_dml=true` fails on purpose in that environment
+([run 45175949477](https://github.com/kisaragychihaya/libsam2_dml/actions/runs/45175949477)), reporting
+`encoder provider : CPUExecutionProvider` with the DirectML error above — CPU can never be mistaken
+for DirectML here.
 
 ## Known caveats
 
@@ -244,12 +262,15 @@ log always states which provider actually ran.
   the same file, which moves the logits by ~1 — far more than any DLL defect. Feed PNG, or compare
   `go_rgb.bin` (the exact pixels the DLL saw), if you need a tight numerical gate. The synthetic
   test image is a PNG for this reason.
-- **No GPU / WARP.** DirectML still initializes on the WARP software adapter, so the DLL reports
-  `DmlExecutionProvider` on a machine without a GPU — but encode times go from ~140 ms to seconds
-  and graph compilation can take minutes. If DirectML cannot be initialized at all, the DLL falls
-  back to `CPUExecutionProvider`, keeps the DirectML failure text in `sam2_get_last_error()`, and
-  `sam2_encoder_provider()`/`sam2_decoder_provider()` tell you which provider is live. The QC
-  client deliberately treats a non-DML provider as a failure.
+- **No GPU / WARP.** On a machine without a discrete GPU, DirectML can still run on the WARP
+  software adapter (still reported as `DmlExecutionProvider`), but encode times go from ~140 ms to
+  seconds. It only works if the adapter DirectML is pointed at actually supports D3D12 — a Hyper-V
+  synthetic display adapter, for example, does not, and DirectML device creation then fails with
+  `Specified display adapter handle is invalid` (measured on GitHub's `windows-latest` runners). In
+  that case the DLL falls back to `CPUExecutionProvider`, keeps the DirectML failure text in
+  `sam2_get_last_error()`, and `sam2_encoder_provider()`/`sam2_decoder_provider()` tell you which
+  provider is live. The QC client deliberately treats a non-DML provider as a failure unless
+  `SAM2_ALLOW_CPU=1` is set explicitly.
 - **Fixed preprocessing, fixed encoder size.** 1024x1024, ImageNet normalization, bilinear resize,
   no batching, single encoder per handle. Changing any of that requires a matching ONNX export.
 - **x64 Windows only.** The build is MSVC `/MD` against `onnxruntime.dll`; the Go client needs
