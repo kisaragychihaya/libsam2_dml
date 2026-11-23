@@ -1,0 +1,19 @@
+# Keep the sources and scripts LF in the repo and in the working tree: the shell
+# scripts, workflow and Go/C++ sources all target Git Bash / MSVC, and a CRLF
+# `#!/usr/bin/env bash` line breaks bash.
+* text=auto eol=lf
+*.sh   text eol=lf
+*.py   text eol=lf
+*.go   text eol=lf
+*.c*   text eol=lf
+*.h    text eol=lf
+*.md   text eol=lf
+*.yml  text eol=lf
+*.json text eol=lf
+*.bat  text eol=crlf
+*.cmd  text eol=crlf
+*.dll  binary
+*.exe  binary
+*.onnx binary
+*.png  binary
+*.bin  binary

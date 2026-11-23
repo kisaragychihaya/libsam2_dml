@@ -1,0 +1,22 @@
+# --- build outputs -----------------------------------------------------------
+native/build/
+native/build.log
+bin/
+
+# ONNX Runtime + DirectML download (the fetch script itself is tracked)
+native/third_party/onnxruntime/
+
+# --- QC / example outputs ----------------------------------------------------
+example/out/
+*.bin
+*.log
+
+# --- models (only shipped as release assets, >100 MB) ------------------------
+*.onnx
+
+# --- python / editors --------------------------------------------------------
+__pycache__/
+*.pyc
+.venv/
+.vscode/
+.idea/
