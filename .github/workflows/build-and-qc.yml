@@ -134,6 +134,10 @@ jobs:
           } else {
             Write-Host "::warning::No DirectML device id in 0..3 initialized; the QC pass will run on the CPU provider and fail while require_dml=true."
           }
+          # The probe deliberately ran binaries that exit non-zero; the GitHub
+          # pwsh wrapper would otherwise fail this informational step with the
+          # last native exit code.
+          exit 0
 
       - name: Run QC (pure-Go FFI -> sam2_dml.dll)
         shell: pwsh
