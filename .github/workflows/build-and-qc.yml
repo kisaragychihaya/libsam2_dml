@@ -196,20 +196,25 @@ jobs:
           $runs = "${{ inputs.runs }}"
           $enc = "${{ github.workspace }}\models\sam2_hiera_small.encoder.onnx"
           $dec = "${{ github.workspace }}\models\sam2_hiera_small.decoder.onnx"
-          python example/ref_dump.py --image example/out/test_image.png --resize float --runs $runs `
-            --encoder $enc --decoder $dec --out example/out/ref_logits_src.bin
-          if ($LASTEXITCODE -ne 0) { throw "ref_dump (image) failed" }
-          python example/ref_dump.py --rgb example/out/go_rgb.bin --resize float --runs $runs `
-            --encoder $enc --decoder $dec --out example/out/ref_logits_gorxgb.bin
-          if ($LASTEXITCODE -ne 0) { throw "ref_dump (go_rgb.bin) failed" }
+          Start-Transcript -Path example/out/compare_output.log | Out-Null
+          try {
+            python example/ref_dump.py --image example/out/test_image.png --resize float --runs $runs `
+              --encoder $enc --decoder $dec --out example/out/ref_logits_src.bin
+            if ($LASTEXITCODE -ne 0) { throw "ref_dump (image) failed" }
+            python example/ref_dump.py --rgb example/out/go_rgb.bin --resize float --runs $runs `
+              --encoder $enc --decoder $dec --out example/out/ref_logits_gorxgb.bin
+            if ($LASTEXITCODE -ne 0) { throw "ref_dump (go_rgb.bin) failed" }
 
-          Write-Host "`n=== GATE: same pixels the DLL saw ==="
-          python example/compare.py example/out/go_logits.bin example/out/ref_logits_gorxgb.bin
-          if ($LASTEXITCODE -ne 0) { throw "compare.py FAILED (go vs python, same pixels)" }
+            Write-Host "`n=== GATE: same pixels the DLL saw ==="
+            python example/compare.py example/out/go_logits.bin example/out/ref_logits_gorxgb.bin
+            if ($LASTEXITCODE -ne 0) { throw "compare.py FAILED (go vs python, same pixels)" }
 
-          Write-Host "`n=== GATE: same PNG decoded by both sides ==="
-          python example/compare.py example/out/go_logits.bin example/out/ref_logits_src.bin
-          if ($LASTEXITCODE -ne 0) { throw "compare.py FAILED (go vs python, same PNG file)" }
+            Write-Host "`n=== GATE: same PNG decoded by both sides ==="
+            python example/compare.py example/out/go_logits.bin example/out/ref_logits_src.bin
+            if ($LASTEXITCODE -ne 0) { throw "compare.py FAILED (go vs python, same PNG file)" }
+          } finally {
+            Stop-Transcript | Out-Null
+          }
 
       - name: Upload artifacts
         if: always()
@@ -223,6 +228,7 @@ jobs:
             bin/onnxruntime.dll
             bin/DirectML.dll
             example/out/qc_output.log
+            example/out/compare_output.log
             example/out/mask_output.png
             example/out/test_image.png
             native/build.log

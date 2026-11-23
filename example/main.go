@@ -667,7 +667,12 @@ func run() error {
 	if err := writeMaskPNG("mask_output.png", bestMask, int(r.maskW), int(r.maskH), img.width, img.height); err != nil {
 		return fmt.Errorf("write mask_output.png: %w", err)
 	}
-	fmt.Println("QC OK: DirectML encoder+decoder reached through pure-Go FFI")
+	onDml := containsFold(encProvider, "Dml") && containsFold(decProvider, "Dml")
+	if onDml {
+		fmt.Println("QC OK: DirectML encoder+decoder reached through pure-Go FFI")
+	} else {
+		fmt.Println("QC OK: encoder+decoder reached through pure-Go FFI (CPU fallback, SAM2_ALLOW_CPU=1)")
+	}
 	return nil
 }
 
