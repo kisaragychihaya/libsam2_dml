@@ -1,8 +1,11 @@
 name: build-and-qc
 
-# Manual only: each backend leg downloads ~90 MB of ncnn-converted models,
-# builds the DLL and runs the QC pass. It never runs on push/PR.
+# Manual runs build and test only. Pushing a version tag also publishes both
+# backend archives to the matching GitHub Release after all QC jobs pass.
 on:
+  push:
+    tags:
+      - "v*"
   workflow_dispatch:
     inputs:
       encoder_param_url:
@@ -35,7 +38,7 @@ on:
         default: ""
 
 permissions:
-  contents: read
+  contents: write
 
 concurrency:
   group: build-and-qc-${{ github.ref }}
@@ -270,3 +273,42 @@ jobs:
           name: sam2_ncnn-win-x64-${{ matrix.backend }}
           if-no-files-found: warn
           path: ${{ env.DIST_ZIP }}
+
+  release:
+    name: Publish GitHub Release
+    if: github.ref_type == 'tag'
+    needs: build-and-qc
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: Download backend dist zips
+        uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+
+      - name: Validate release tag
+        shell: pwsh
+        run: |
+          if ('${{ github.ref_name }}' -notmatch '^v\d+\.\d+\.\d+$') {
+            throw "tag '${{ github.ref_name }}' is not a version release tag"
+          }
+
+      - name: Rename backend dist zips
+        shell: pwsh
+        run: |
+          foreach ($backend in @("cpu", "vulkan")) {
+            $src = "release-artifacts/sam2_ncnn-win-x64-$backend/dist-${{ github.ref_name }}.zip"
+            if (-not (Test-Path $src)) { throw "missing artifact: $src" }
+            Copy-Item $src "release-artifacts/dist-${{ github.ref_name }}-$backend.zip" -Force
+          }
+
+      - name: Publish CPU/Vulkan archives to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            release-artifacts/dist-${{ github.ref_name }}-cpu.zip
+            release-artifacts/dist-${{ github.ref_name }}-vulkan.zip

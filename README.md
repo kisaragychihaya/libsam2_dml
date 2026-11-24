@@ -134,6 +134,13 @@ The Vulkan path uses fp32 storage and arithmetic for numerical stability. If no 
 Vulkan device is available, creation succeeds on Cpu and `sam2_get_last_error()` explains
 the fallback.
 
+## Releases
+
+Pushing a `v*` tag starts the build-and-QC workflow. When both backend jobs pass, the
+workflow publishes `dist-<tag>-cpu.zip` and `dist-<tag>-vulkan.zip` to the matching
+GitHub Release. Each zip contains `bin/sam2qc.exe` and `bin/sam2_ncnn.dll`. Manual
+workflow runs do not create a Release.
+
 ## Go example
 
 Stage the client, DLL and five model files together:
