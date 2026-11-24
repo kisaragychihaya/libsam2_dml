@@ -1,4 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
+if(POLICY CMP0144)
+  cmake_policy(SET CMP0144 NEW)
+endif()
 project(sam2_ncnn LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
@@ -24,12 +27,8 @@ set(NCNN_ROOT "" CACHE PATH "Prebuilt ncnn install prefix (include/ + lib/)")
 set(NCNN_TAG "0a2c46bc75987a39d3b044c77385c564e83c0a84" CACHE STRING "Tencent/ncnn git tag used by the FetchContent fallback")
 
 if(NCNN_ROOT)
-  add_library(ncnn STATIC IMPORTED GLOBAL)
-  unset(NCNN_LIB CACHE)
-  find_library(NCNN_LIB NAMES ncnn libncnn PATHS "${NCNN_ROOT}/lib" NO_DEFAULT_PATH REQUIRED)
-  set_target_properties(ncnn PROPERTIES
-    IMPORTED_LOCATION "${NCNN_LIB}"
-    INTERFACE_INCLUDE_DIRECTORIES "${NCNN_ROOT}/include")
+  find_package(ncnn CONFIG REQUIRED
+    PATHS "${NCNN_ROOT}/lib/cmake/ncnn" NO_DEFAULT_PATH)
 else()
   include(FetchContent)
   set(NCNN_VULKAN ${SAM2_VULKAN} CACHE BOOL "" FORCE)
@@ -50,10 +49,6 @@ add_library(sam2_ncnn SHARED
   include/sam2_ncnn.h
 )
 
-if(SAM2_VULKAN)
-  find_package(Vulkan REQUIRED)
-endif()
-
 target_compile_definitions(sam2_ncnn PRIVATE
   SAM2_NCNN_BUILD=1
   SAM2_VULKAN=$<BOOL:${SAM2_VULKAN}>
@@ -63,9 +58,6 @@ target_include_directories(sam2_ncnn PRIVATE
   "${CMAKE_CURRENT_SOURCE_DIR}/include"
 )
 target_link_libraries(sam2_ncnn PRIVATE ncnn)
-if(SAM2_VULKAN)
-  target_link_libraries(sam2_ncnn PRIVATE Vulkan::Vulkan)
-endif()
 if(MSVC)
   target_compile_options(sam2_ncnn PRIVATE /W4 /permissive- /utf-8 /EHsc /MP)
   if(NOT SAM2_VULKAN)

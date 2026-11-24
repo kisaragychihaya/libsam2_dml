@@ -15,9 +15,9 @@
 #define SAM2_VULKAN 0
 #endif
 
-#include <ncnn/gpu.h>
-#include <ncnn/mat.h>
-#include <ncnn/net.h>
+#include <gpu.h>
+#include <mat.h>
+#include <net.h>
 
 #include <algorithm>
 #include <cmath>

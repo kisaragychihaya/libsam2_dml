@@ -104,7 +104,7 @@ discovery with `VCVARS=`, `CMAKE=` and `NINJA=` when needed.
 
 ```bash
 ./native/build.sh                         # CPU -> native/build/sam2_ncnn.dll
-VULKAN=1 ./native/build.sh                # Vulkan; requires the Vulkan SDK
+VULKAN=1 ./native/build.sh                # Vulkan (bundled loader and shader compiler)
 NCNN_ROOT=/path/to/ncnn-install ./native/build.sh
 ```
 
@@ -124,7 +124,7 @@ this ncnn revision; other revisions are not assumed to be compatible.
 | `SAM2_VULKAN` | Provider | Requirements |
 | --- | --- | --- |
 | `OFF` (default) | `Cpu` | No GPU SDK or runtime requirement |
-| `ON` | `Vulkan`, or `Cpu` after fallback | Vulkan SDK at build time; Vulkan device for GPU execution |
+| `ON` | `Vulkan`, or `Cpu` after fallback | Vulkan device for GPU execution; loader and shader compiler are built from ncnn sources |
 
 The Vulkan path uses fp32 storage and arithmetic for numerical stability. If no requested
 Vulkan device is available, creation succeeds on Cpu and `sam2_get_last_error()` explains

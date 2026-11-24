@@ -5,7 +5,7 @@
 # vcvars64.bat can set up the MSVC environment.
 #
 #   ./native/build.sh                       # CPU backend, log -> native/build.log
-#   VULKAN=1 ./native/build.sh              # Vulkan backend (needs Vulkan SDK)
+#   VULKAN=1 ./native/build.sh              # Vulkan backend
 #   NCNN_ROOT=/path/to/ncnn-install ./native/build.sh
 #
 # Overrides: VCVARS, CMAKE, NINJA, VULKAN (0/1), NCNN_ROOT (prebuilt ncnn

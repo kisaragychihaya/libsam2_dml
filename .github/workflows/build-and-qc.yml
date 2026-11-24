@@ -128,7 +128,13 @@ jobs:
       - name: Probe Vulkan (informational)
         if: matrix.vulkan == 'ON'
         shell: pwsh
-        run: vulkaninfo --summary || Write-Host "::warning::vulkaninfo not available"
+        run: |
+          if (Get-Command vulkaninfo -ErrorAction SilentlyContinue) {
+            vulkaninfo --summary
+            if ($LASTEXITCODE -ne 0) { Write-Host "::warning::vulkaninfo could not probe a device" }
+          } else {
+            Write-Host "::warning::vulkaninfo not available"
+          }
 
       - name: Configure + build sam2_ncnn.dll (CMake + Ninja, Release x64)
         shell: pwsh
