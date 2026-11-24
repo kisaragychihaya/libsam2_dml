@@ -1,22 +1,22 @@
-// Command sam2qc is a pure-Go (CGO_ENABLED=0) smoke test for sam2_dml.dll.
+// Command sam2qc is a pure-Go (CGO_ENABLED=0) smoke test for sam2_ncnn.dll.
 //
 // It loads the DLL with syscall.NewLazyDLL and talks to the C ABI declared in
-// native/include/sam2_dml.h. No cgo, no local C toolchain required.
+// native/include/sam2_ncnn.h. No cgo, no local C toolchain required.
 //
 //	sam2qc.exe --gen-test-image test_image.png   write the synthetic test image
 //	sam2qc.exe <image.jpg|image.png>             run the QC pass on an image
 //
 // Environment overrides:
 //
-//	SAM2_DLL       absolute path of sam2_dml.dll   (default: next to the exe)
-//	SAM2_ENCODER   absolute path of sam2_hiera_small.encoder.onnx
-//	SAM2_DECODER   absolute path of sam2_hiera_small.decoder.onnx
-//	SAM2_DEVICE    adapter/device index (default 0)
+//	SAM2_DLL       absolute path of sam2_ncnn.dll   (default: next to the exe)
+//	SAM2_ENCODER   absolute path of sam2_encoder_fixed.ncnn.param
+//	SAM2_DECODER   absolute path of sam2_decoder_fixed.ncnn.param
+//	SAM2_DEVICE    Vulkan device index (default 0; ignored by the CPU backend)
 //	SAM2_RUNS      timed iterations per stage (default 5)
 //	SAM2_EXPECT    case-insensitive substring the provider string must contain,
-//	                e.g. "Dml" / "Cuda" / "Tensorrt" / "Cpu" (default "Dml")
-//	SAM2_ALLOW_CPU continue (with a warning) instead of failing when the expected
-//	                EP is unavailable and the DLL fell back to CPUExecutionProvider
+//	                either "Vulkan" or "Cpu" (default "Cpu")
+//	SAM2_ALLOW_CPU continue (with a warning) instead of failing when Vulkan is
+//	                unavailable and the DLL fell back to Cpu
 //
 // Artifacts written to the current directory:
 //
@@ -99,7 +99,7 @@ type sam2lib struct {
 
 func load(path string) (*sam2lib, error) {
 	if _, err := os.Stat(path); err != nil {
-		return nil, fmt.Errorf("sam2_dml.dll not found at %s: %w", path, err)
+		return nil, fmt.Errorf("sam2_ncnn.dll not found at %s: %w", path, err)
 	}
 	l := &sam2lib{dll: syscall.NewLazyDLL(path)}
 	l.getLastError = l.dll.NewProc("sam2_get_last_error")
@@ -354,8 +354,8 @@ func ms(d time.Duration) string { return strconv.FormatFloat(float64(d)/1e6, 'f'
 // path resolution
 // ---------------------------------------------------------------------------
 
-// exeDir is where the QC binary lives. The staged layout keeps sam2_dml.dll,
-// onnxruntime.dll and DirectML.dll in that same directory, so no PATH surgery
+// exeDir is where the QC binary lives. The staged layout keeps sam2_ncnn.dll,
+// the model files in that same directory, so no PATH surgery
 // is needed to load them.
 func exeDir() string {
 	p, err := os.Executable()
@@ -443,14 +443,14 @@ func run() error {
 		return err
 	}
 
-	dllPath := valueOr("SAM2_DLL", filepath.Join(exeDir(), "sam2_dml.dll"))
+	dllPath := valueOr("SAM2_DLL", filepath.Join(exeDir(), "sam2_ncnn.dll"))
 	dllPath, err = filepath.Abs(dllPath)
 	if err != nil {
 		return err
 	}
 
-	encoderPath := valueOr("SAM2_ENCODER", modelPath("sam2_hiera_small.encoder.onnx"))
-	decoderPath := valueOr("SAM2_DECODER", modelPath("sam2_hiera_small.decoder.onnx"))
+	encoderPath := valueOr("SAM2_ENCODER", modelPath("sam2_encoder_fixed.ncnn.param"))
+	decoderPath := valueOr("SAM2_DECODER", modelPath("sam2_decoder_fixed.ncnn.param"))
 	deviceID := 0
 	if s := os.Getenv("SAM2_DEVICE"); s != "" {
 		v, convErr := strconv.Atoi(s)
@@ -461,7 +461,7 @@ func run() error {
 	}
 	runs := timedRuns()
 	allowCPU := truthy(os.Getenv("SAM2_ALLOW_CPU"))
-	expected := valueOr("SAM2_EXPECT", "Dml")
+	expected := valueOr("SAM2_EXPECT", "Cpu")
 
 	for _, p := range []string{imagePath, encoderPath, decoderPath} {
 		if _, statErr := os.Stat(p); statErr != nil {
@@ -469,10 +469,10 @@ func run() error {
 		}
 	}
 
-	fmt.Printf("sam2_dml.dll     : %s\n", dllPath)
+	fmt.Printf("sam2_ncnn.dll     : %s\n", dllPath)
 	fmt.Printf("image            : %s\n", imagePath)
-	fmt.Printf("encoder onnx     : %s\n", encoderPath)
-	fmt.Printf("decoder onnx     : %s\n", decoderPath)
+	fmt.Printf("encoder param    : %s\n", encoderPath)
+	fmt.Printf("decoder param    : %s\n", decoderPath)
 	fmt.Printf("device_id        : %d\n", deviceID)
 
 	lib, err := load(dllPath)

@@ -1,20 +1,25 @@
-/* sam2_dml.h - C ABI for the SAM2 (Hiera-Small) ONNX Runtime + DirectML DLL.
+/* sam2_ncnn.h - C ABI for the SAM2 (Hiera-Small) ncnn DLL (Vulkan or CPU).
  *
  * This header is the contract shared with the pure-Go FFI client (syscall.NewLazyDLL).
  * Field order/types in sam2_decode_result_t are mapped 1:1 by unsafe.Pointer on the
- * Go side - do not reorder/rename without updating goqc/main.go.
+ * Go side - do not reorder/rename without updating example/main.go.
+ *
+ * Engine: ncnn. Models are pnnx-converted sam2_*_fixed.ncnn.param/.bin pairs;
+ * point/prompt embedding runs inside the DLL, driven by constants from
+ * sam2_prompt.bin (expected next to the decoder .param). The runtime is one
+ * DLL plus model files, with the same binary layout on any platform.
  *
  * Threading: every handle is internally serialized with a mutex. A handle may be used
  * from different threads, but concurrent calls on the same handle run one at a time.
  * Error text is per-thread and stays valid until the next call on that thread.
  */
-#ifndef SAM2_DML_H
-#define SAM2_DML_H
+#ifndef SAM2_NCNN_H
+#define SAM2_NCNN_H
 
 #include <stdint.h>
 
 #ifdef _WIN32
-#  ifdef SAM2_DML_BUILD
+#  ifdef SAM2_NCNN_BUILD
 #    define SAM2_API __declspec(dllexport)
 #  else
 #    define SAM2_API __declspec(dllimport)
@@ -34,19 +39,21 @@ typedef struct sam2_embedding sam2_embedding_t;
 /* Thread-local, NUL-terminated, plain ASCII. Never free. Valid until the next
  * sam2_* call on the same thread. Returns "" when no error is pending.
  * Note: when sam2_*_create() succeeds but had to fall back to the CPU provider,
- * this still holds the DirectML failure reason. */
+ * this still holds the Vulkan initialization failure reason. */
 SAM2_API const char* sam2_get_last_error(void);
 
-/* model_path_utf8: UTF-8 path to sam2_hiera_small.encoder.onnx
- * device_id: adapter/device index, 0 = default device, must be >= 0.
+/* model_path_utf8: UTF-8 path to sam2_encoder_fixed.ncnn.param (the matching
+ * .bin must sit next to it). device_id: Vulkan device index when the Vulkan
+ * backend is compiled in (CPU build ignores it), 0 = default, must be >= 0.
  * Performs one dummy warmup inference so the first real call is not penalized
  * by provider graph compilation. Returns NULL on failure (see sam2_get_last_error). */
 SAM2_API sam2_encoder_t* sam2_encoder_create(const char* model_path_utf8, int device_id);
 SAM2_API void sam2_encoder_destroy(sam2_encoder_t* enc);
 
-/* The execution provider attached at build time (e.g. "DmlExecutionProvider",
- * "CUDAExecutionProvider") when it attached successfully, otherwise
- * "CPUExecutionProvider". Returns "" for a NULL handle. */
+/* The backend attached at build time: "Vulkan" when the Vulkan backend was
+ * compiled in and the device initialized, otherwise "Cpu". When "Cpu" is
+ * reported despite a Vulkan request, sam2_get_last_error() holds the reason.
+ * Returns "" for a NULL handle. */
 SAM2_API const char* sam2_encoder_provider(const sam2_encoder_t* enc);
 
 /* rgb: RGB24 pixels, row stride in bytes (pass width*3 for tightly packed).
@@ -90,4 +97,4 @@ SAM2_API void sam2_decode_result_destroy(sam2_decode_result_t* res);
 } /* extern "C" */
 #endif
 
-#endif /* SAM2_DML_H */
+#endif /* SAM2_NCNN_H */

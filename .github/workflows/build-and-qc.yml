@@ -1,29 +1,36 @@
 name: build-and-qc
 
-# Manual only: each matrix leg downloads ~175 MB of model weights, builds the DLL
-# with MSVC, and runs the QC pass. It never runs on push/PR.
+# Manual only: each backend leg downloads ~90 MB of ncnn-converted models,
+# builds the DLL and runs the QC pass. It never runs on push/PR.
 on:
   workflow_dispatch:
     inputs:
-      encoder_url:
-        description: URL of sam2_hiera_small.encoder.onnx
+      encoder_param_url:
+        description: URL of sam2_encoder_fixed.ncnn.param
         required: false
-        default: https://github.com/kisaragychihaya/libsam2_dml/releases/download/v0.1.0/sam2_hiera_small.encoder.onnx
-      decoder_url:
-        description: URL of sam2_hiera_small.decoder.onnx
+        default: https://github.com/kisaragychihaya/libsam2_ncnn/releases/download/v0.2.0/sam2_encoder_fixed.ncnn.param
+      encoder_bin_url:
+        description: URL of sam2_encoder_fixed.ncnn.bin
         required: false
-        default: https://github.com/kisaragychihaya/libsam2_dml/releases/download/v0.1.0/sam2_hiera_small.decoder.onnx
+        default: https://github.com/kisaragychihaya/libsam2_ncnn/releases/download/v0.2.0/sam2_encoder_fixed.ncnn.bin
+      decoder_param_url:
+        description: URL of sam2_decoder_fixed.ncnn.param
+        required: false
+        default: https://github.com/kisaragychihaya/libsam2_ncnn/releases/download/v0.2.0/sam2_decoder_fixed.ncnn.param
+      decoder_bin_url:
+        description: URL of sam2_decoder_fixed.ncnn.bin
+        required: false
+        default: https://github.com/kisaragychihaya/libsam2_ncnn/releases/download/v0.2.0/sam2_decoder_fixed.ncnn.bin
+      prompt_bin_url:
+        description: URL of sam2_prompt.bin
+        required: false
+        default: https://github.com/kisaragychihaya/libsam2_ncnn/releases/download/v0.2.0/sam2_prompt.bin
       runs:
-        description: Timed iterations per stage (encoder/decoder/reference)
+        description: Timed iterations per stage (encoder/decoder)
         required: false
         default: "2"
-      require_dml:
-        description: Fail when the directml leg reports a non-DirectML provider (WARP software adapter still counts as DirectML)
-        type: boolean
-        required: false
-        default: true
       version:
-        description: Dist zip suffix, i.e. dist-<ep>-<version>.zip (empty = git describe --tags)
+        description: Dist zip suffix, i.e. dist-<version>.zip (empty = git describe --tags)
         required: false
         default: ""
 
@@ -34,24 +41,103 @@ concurrency:
   group: build-and-qc-${{ github.ref }}
   cancel-in-progress: false
 
+env:
+  # 0a2c46bc75 = 2026-08-25 master, the era the converted models were validated
+  # against. 20260526 mis-computes the deeper encoder stages; 20261020+
+  # segfault on the decoder graph.
+  NCNN_TAG: "0a2c46bc75987a39d3b044c77385c564e83c0a84"
+
 jobs:
+  # Build static libncnn (Vulkan enabled) once and cache it. A Vulkan-enabled
+  # ncnn serves both backends: the cpu leg links the same archive and
+  # delay-loads the Vulkan loader, so its DLL still has no runtime dependency.
+  # ~15-25 min on a cache miss, instant on a hit; keyed by ncnn tag + runner
+  # image so a bump of either rebuilds exactly once.
+  libncnn:
+    name: libncnn (vulkan)
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/cache/restore@v4
+        id: cache
+        with:
+          path: native/third_party/ncnn-install
+          key: libncnn-${{ env.NCNN_TAG }}-${{ runner.os }}-amd64
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: steps.cache.outputs.cache-hit != 'true'
+        with:
+          arch: x64
+
+      - name: Build + install static libncnn (NCNN_VULKAN=ON)
+        if: steps.cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          git init --quiet native/third_party/ncnn-src
+          git -C native/third_party/ncnn-src remote add origin https://github.com/Tencent/ncnn
+          git -C native/third_party/ncnn-src fetch --quiet --depth 1 origin $env:NCNN_TAG
+          git -C native/third_party/ncnn-src checkout --quiet FETCH_HEAD
+          cmake -S native/third_party/ncnn-src -B native/third_party/ncnn-build -G Ninja `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DNCNN_VULKAN=ON `
+            -DNCNN_SHARED_LIB=OFF `
+            -DNCNN_BUILD_TESTS=OFF -DNCNN_BUILD_TOOLS=OFF `
+            -DNCNN_BUILD_EXAMPLES=OFF -DNCNN_BUILD_BENCHMARK=OFF `
+            -DCMAKE_INSTALL_PREFIX="${{ github.workspace }}/native/third_party/ncnn-install"
+          if ($LASTEXITCODE -ne 0) { throw "cmake configure failed" }
+          cmake --build native/third_party/ncnn-build
+          if ($LASTEXITCODE -ne 0) { throw "cmake build failed" }
+          cmake --install native/third_party/ncnn-build
+          if ($LASTEXITCODE -ne 0) { throw "cmake install failed" }
+
+      - uses: actions/cache/save@v4
+        if: steps.cache.outputs.cache-hit != 'true'
+        with:
+          path: native/third_party/ncnn-install
+          key: libncnn-${{ env.NCNN_TAG }}-${{ runner.os }}-amd64
+
   build-and-qc:
-    name: "${{ matrix.ep }} (windows-latest)"
+    name: "${{ matrix.backend }} (windows-latest)"
     runs-on: windows-latest
     timeout-minutes: 120
+    needs: libncnn
     strategy:
       fail-fast: false
       matrix:
-        # Hosted runners have no GPU and no NVIDIA stack, so cuda/tensorrt legs
-        # attach-fail and run the QC on the CPU fallback; they still gate the
-        # build, the provider reporting, and the Go-vs-Python numerics.
-        ep: [directml, cuda, tensorrt, cpu]
+        include:
+          - { backend: cpu,    vulkan: OFF, expect: Cpu,    allow_cpu: "" }
+          - { backend: vulkan, vulkan: ON,  expect: Vulkan, allow_cpu: "1" }
 
     steps:
       - uses: actions/checkout@v4
         with:
-          # Full history so git describe --tags can name the dist zip.
           fetch-depth: 0
+
+      - name: Restore libncnn (vulkan-enabled build serves both backends)
+        uses: actions/cache/restore@v4
+        with:
+          path: native/third_party/ncnn-install
+          key: libncnn-${{ env.NCNN_TAG }}-${{ runner.os }}-amd64
+          fail-on-cache-miss: true
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Probe Vulkan (informational)
+        if: matrix.vulkan == 'ON'
+        shell: pwsh
+        run: vulkaninfo --summary || Write-Host "::warning::vulkaninfo not available"
+
+      - name: Configure + build sam2_ncnn.dll (CMake + Ninja, Release x64)
+        shell: pwsh
+        run: |
+          cmake -S native -B native/build -G Ninja -DCMAKE_BUILD_TYPE=Release `
+            -DSAM2_VULKAN=${{ matrix.vulkan }} `
+            -DNCNN_ROOT="${{ github.workspace }}/native/third_party/ncnn-install"
+          if ($LASTEXITCODE -ne 0) { throw "cmake configure failed" }
+          cmake --build native/build
+          if ($LASTEXITCODE -ne 0) { throw "cmake build failed" }
 
       - uses: actions/setup-go@v5
         with:
@@ -61,21 +147,6 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-
-      - name: Fetch ONNX Runtime package (EP=${{ matrix.ep }})
-        run: python native/third_party/fetch_ort.py ${{ matrix.ep }}
-
-      - uses: ilammy/msvc-dev-cmd@v1
-        with:
-          arch: x64
-
-      - name: Configure + build sam2_dml.dll (CMake + Ninja, Release x64)
-        shell: pwsh
-        run: |
-          cmake -S native -B native/build -G Ninja -DCMAKE_BUILD_TYPE=Release -DSAM2_ORT_EP=${{ matrix.ep }}
-          if ($LASTEXITCODE -ne 0) { throw "cmake configure failed" }
-          cmake --build native/build
-          if ($LASTEXITCODE -ne 0) { throw "cmake build failed" }
 
       - name: Build Go example (CGO_ENABLED=0)
         shell: pwsh
@@ -88,22 +159,26 @@ jobs:
           Pop-Location
           if ($rc -ne 0) { throw "go build failed" }
 
-      - name: Stage DLLs next to the exe
-        shell: pwsh
-        run: |
-          Copy-Item native/build/sam2_dml.dll, native/build/onnxruntime.dll bin -Force
-          Get-ChildItem native/build/onnxruntime_providers_*.dll, native/build/DirectML.dll -ErrorAction SilentlyContinue |
-            ForEach-Object { Copy-Item $_ bin -Force }
-          Get-ChildItem bin | Format-Table Name, Length
-
       - name: Download models
         shell: pwsh
         run: |
-          curl.exe -L --retry 3 --fail -o models/sam2_hiera_small.encoder.onnx "${{ inputs.encoder_url }}"
-          if ($LASTEXITCODE -ne 0) { throw "encoder download failed" }
-          curl.exe -L --retry 3 --fail -o models/sam2_hiera_small.decoder.onnx "${{ inputs.decoder_url }}"
-          if ($LASTEXITCODE -ne 0) { throw "decoder download failed" }
+          curl.exe -L --retry 3 --fail -o models/sam2_encoder_fixed.ncnn.param "${{ inputs.encoder_param_url }}"
+          if ($LASTEXITCODE -ne 0) { throw "encoder param download failed" }
+          curl.exe -L --retry 3 --fail -o models/sam2_encoder_fixed.ncnn.bin "${{ inputs.encoder_bin_url }}"
+          if ($LASTEXITCODE -ne 0) { throw "encoder bin download failed" }
+          curl.exe -L --retry 3 --fail -o models/sam2_decoder_fixed.ncnn.param "${{ inputs.decoder_param_url }}"
+          if ($LASTEXITCODE -ne 0) { throw "decoder param download failed" }
+          curl.exe -L --retry 3 --fail -o models/sam2_decoder_fixed.ncnn.bin "${{ inputs.decoder_bin_url }}"
+          if ($LASTEXITCODE -ne 0) { throw "decoder bin download failed" }
+          curl.exe -L --retry 3 --fail -o models/sam2_prompt.bin "${{ inputs.prompt_bin_url }}"
+          if ($LASTEXITCODE -ne 0) { throw "prompt bin download failed" }
           Get-ChildItem models | Format-Table Name, Length
+
+      - name: Stage DLL next to the exe
+        shell: pwsh
+        run: |
+          Copy-Item native/build/sam2_ncnn.dll bin -Force
+          Get-ChildItem bin | Format-Table Name, Length
 
       - name: Generate deterministic synthetic test image
         shell: pwsh
@@ -111,97 +186,28 @@ jobs:
           ./bin/sam2qc.exe --gen-test-image example/out/test_image.png
           if ($LASTEXITCODE -ne 0) { throw "test image generation failed" }
 
-      - name: Inventory display adapters
-        shell: pwsh
-        run: |
-          Get-CimInstance Win32_VideoController |
-            Select-Object Name, Status, DriverVersion, AdapterCompatibility | Format-List
-
-      # Hosted runners have no GPU. DirectML can still run on the WARP software
-      # adapter, but only if the adapter ORT enumerates at the requested
-      # device_id is D3D12-capable. Probe the first four ids and export whichever
-      # one reports DmlExecutionProvider for the real QC pass below. Meaningful
-      # for the directml leg only; other EPs use device_id 0.
-      - name: Probe DirectML adapter ids
-        if: matrix.ep == 'directml'
+      - name: Run QC (pure-Go FFI -> sam2_ncnn.dll)
         shell: pwsh
         env:
-          SAM2_DLL: ${{ github.workspace }}\bin\sam2_dml.dll
-          SAM2_ENCODER: ${{ github.workspace }}\models\sam2_hiera_small.encoder.onnx
-          SAM2_DECODER: ${{ github.workspace }}\models\sam2_hiera_small.decoder.onnx
-          SAM2_RUNS: "1"
-        run: |
-          $picked = $null
-          foreach ($d in 0..3) {
-            $env:SAM2_DEVICE = "$d"
-            Push-Location example/out
-            & "$env:GITHUB_WORKSPACE\bin\sam2qc.exe" test_image.png *> "probe_$d.log"
-            $rc = $LASTEXITCODE
-            Pop-Location
-            $prov = (Select-String -Path "example/out/probe_$d.log" -Pattern '^encoder provider' |
-                     Select-Object -First 1).Line
-            $note = (Select-String -Path "example/out/probe_$d.log" -Pattern '^encoder note' |
-                     Select-Object -First 1).Line
-            Write-Host "SAM2_DEVICE=$d exit=$rc  $prov"
-            if ($note) { Write-Host "                $note" }
-            if ($prov -match 'Dml') { $picked = $d; break }
-          }
-          if ($null -ne $picked) {
-            Write-Host "DirectML available at device_id=$picked"
-            "SAM2_DEVICE=$picked" | Add-Content -Path $env:GITHUB_ENV
-          } else {
-            Write-Host "::warning::No DirectML device id in 0..3 initialized; the QC pass will run on the CPU provider and fail while require_dml=true."
-          }
-          # The probe deliberately ran binaries that exit non-zero; the GitHub
-          # pwsh wrapper would otherwise fail this informational step with the
-          # last native exit code.
-          exit 0
-
-      - name: Run QC (pure-Go FFI -> sam2_dml.dll)
-        shell: pwsh
-        env:
-          SAM2_DLL: ${{ github.workspace }}\bin\sam2_dml.dll
-          SAM2_ENCODER: ${{ github.workspace }}\models\sam2_hiera_small.encoder.onnx
-          SAM2_DECODER: ${{ github.workspace }}\models\sam2_hiera_small.decoder.onnx
+          SAM2_DLL: ${{ github.workspace }}\bin\sam2_ncnn.dll
+          SAM2_ENCODER: ${{ github.workspace }}\models\sam2_encoder_fixed.ncnn.param
+          SAM2_DECODER: ${{ github.workspace }}\models\sam2_decoder_fixed.ncnn.param
           SAM2_RUNS: ${{ inputs.runs }}
-          SAM2_EXPECT: ${{ matrix.ep == 'directml' && 'Dml' || (matrix.ep == 'cuda' && 'Cuda' || (matrix.ep == 'tensorrt' && 'Tensorrt' || 'Cpu')) }}
+          SAM2_EXPECT: ${{ matrix.expect }}
+          SAM2_ALLOW_CPU: ${{ matrix.allow_cpu }}
         run: |
-          $device = if ($env:SAM2_DEVICE) { $env:SAM2_DEVICE } else { "0" }
-          if ("${{ matrix.ep }}" -eq "directml") {
-            $requireDml = "${{ inputs.require_dml }}"
-          } else {
-            # No GPU/NVIDIA stack on hosted runners: the leg's EP cannot attach,
-            # so the CPU fallback is the expected mode. sam2qc.exe still fails on
-            # its own if the provider string does not match, a CPU fallback can
-            # never pass as the expected EP, and the numerical cross-check below
-            # gates the run.
-            $requireDml = "false"
-            $env:SAM2_ALLOW_CPU = "1"
-          }
-          Write-Host "SAM2_DEVICE=$device (ep=${{ matrix.ep }}, require_dml=$requireDml)"
-          if ($requireDml -ne "true") {
-            # Explicit, logged escape hatch: keep the numerical cross-check
-            # running even when DirectML is unavailable. Never used by default.
-            Write-Host "::warning::require_dml=false - setting SAM2_ALLOW_CPU=1; a CPU fallback will NOT be treated as DirectML"
-            $env:SAM2_ALLOW_CPU = "1"
-          }
+          Write-Host "SAM2_DEVICE=0 (backend=${{ matrix.backend }}, expect=${{ matrix.expect }})"
           Push-Location example/out
           & "$env:GITHUB_WORKSPACE\bin\sam2qc.exe" test_image.png *> qc_output.log
           $rc = $LASTEXITCODE
           Pop-Location
           Get-Content example/out/qc_output.log
-          # sam2qc.exe fails on its own when the provider is not DirectML, so a
-          # CPU fallback can never pass as DirectML; require_dml=false only
-          # downgrades that specific check to a warning.
-          if ($rc -ne 0 -and $requireDml -eq "true") { throw "sam2qc.exe exited with $rc" }
-          if ($rc -ne 0) {
-            Write-Host "::warning::sam2qc.exe exited with $rc but require_dml=false, continuing to the numerical cross-check"
-          }
+          if ($rc -ne 0) { throw "sam2qc.exe exited with $rc" }
 
       - name: Assert provider
         shell: pwsh
         run: |
-          $expect = @{ directml = 'Dml'; cuda = 'Cuda'; tensorrt = 'Tensorrt'; cpu = 'Cpu' }['${{ matrix.ep }}']
+          $expect = '${{ matrix.expect }}'
           $log = Get-Content example/out/qc_output.log -Raw
           $eps = [regex]::Matches($log, '(?m)^(?<stage>encoder|decoder) provider\s*:\s*(?<p>\S+)')
           $summary = @()
@@ -214,46 +220,27 @@ jobs:
           $fallback = @($eps | Where-Object { $_.Groups['p'].Value -notmatch $expect })
           if ($fallback.Count -gt 0) {
             $names = $fallback | ForEach-Object { $_.Groups['p'].Value }
-            if ("${{ matrix.ep }}" -eq "directml" -and "${{ inputs.require_dml }}" -eq "true") {
-              throw "DirectML was required but the DLL fell back: $($names -join ', ')"
+            if ($expect -eq 'Vulkan') {
+              # Hosted runners have no Vulkan-capable GPU: the DLL falls back
+              # to Cpu and the numerical cross-check below is the gate.
+              Write-Host "::warning::Vulkan did not attach ($($names -join ', ')) - expected on hosted runners without a GPU"
+              $summary += "note: fell back to $($names -join ', ') - expected on hosted runners"
+            } else {
+              throw "$expect backend expected but the DLL reports: $($names -join ', ')"
             }
-            # cuda/tensorrt on GPU-less hosted runners always land here; the
-            # numerical cross-check is the gate for those legs.
-            Write-Host "::warning::${{ matrix.ep }} EP did not attach ($($names -join ', ')) - expected on hosted runners without a GPU/NVIDIA stack"
-            $summary += "note: fell back to $($names -join ', ') - expected on hosted runners"
           }
-          @("## Provider (${{ matrix.ep }})", '```', $summary, '```') | Add-Content -Path $env:GITHUB_STEP_SUMMARY
+          @("## Provider (${{ matrix.backend }})", '```', $summary, '```') | Add-Content -Path $env:GITHUB_STEP_SUMMARY
 
-      - name: Install Python reference deps
-        run: python -m pip install --upgrade onnxruntime-directml pillow numpy
+      - name: Install Python comparison dependency
+        run: python -m pip install --upgrade numpy
 
-      - name: Python reference dump + compare (atol=1e-3)
+      - name: Compare with PyTorch single-mask reference (atol=2e-2)
         shell: pwsh
         run: |
-          $runs = "${{ inputs.runs }}"
-          $enc = "${{ github.workspace }}\models\sam2_hiera_small.encoder.onnx"
-          $dec = "${{ github.workspace }}\models\sam2_hiera_small.decoder.onnx"
-          Start-Transcript -Path example/out/compare_output.log | Out-Null
-          try {
-            python example/ref_dump.py --image example/out/test_image.png --resize float --runs $runs `
-              --encoder $enc --decoder $dec --out example/out/ref_logits_src.bin
-            if ($LASTEXITCODE -ne 0) { throw "ref_dump (image) failed" }
-            python example/ref_dump.py --rgb example/out/go_rgb.bin --resize float --runs $runs `
-              --encoder $enc --decoder $dec --out example/out/ref_logits_gorxgb.bin
-            if ($LASTEXITCODE -ne 0) { throw "ref_dump (go_rgb.bin) failed" }
+          python example/compare.py example/out/go_logits.bin example/test_data/sam2_qc_reference.bin
+          if ($LASTEXITCODE -ne 0) { throw "compare.py FAILED (Go vs PyTorch reference)" }
 
-            Write-Host "`n=== GATE: same pixels the DLL saw ==="
-            python example/compare.py example/out/go_logits.bin example/out/ref_logits_gorxgb.bin
-            if ($LASTEXITCODE -ne 0) { throw "compare.py FAILED (go vs python, same pixels)" }
-
-            Write-Host "`n=== GATE: same PNG decoded by both sides ==="
-            python example/compare.py example/out/go_logits.bin example/out/ref_logits_src.bin
-            if ($LASTEXITCODE -ne 0) { throw "compare.py FAILED (go vs python, same PNG file)" }
-          } finally {
-            Stop-Transcript | Out-Null
-          }
-
-      - name: Package dist zip (exe + DLLs)
+      - name: Package dist zip (exe + DLL)
         if: always()
         shell: pwsh
         env:
@@ -261,17 +248,11 @@ jobs:
         run: |
           $version = "$env:VERSION_INPUT"
           if (-not $version) { $version = git describe --tags --always }
-          $zip = "dist-${{ matrix.ep }}-$version.zip"
+          $zip = "dist-$version.zip"
           "DIST_ZIP=$zip" | Add-Content -Path $env:GITHUB_ENV
-          # Missing bin\ means an early build failure; leave the zip absent so
-          # the upload step warns, same as the old per-file behavior.
           if (Test-Path bin/sam2qc.exe) {
             New-Item -ItemType Directory -Force package/bin | Out-Null
-            Copy-Item bin/sam2qc.exe, bin/sam2_dml.dll, bin/onnxruntime.dll package/bin
-            # Per-EP extras: onnxruntime_providers_*.dll for cuda/tensorrt,
-            # DirectML.dll for directml; absent legs simply copy nothing.
-            Get-ChildItem bin/onnxruntime_providers_*.dll, bin/DirectML.dll -ErrorAction SilentlyContinue |
-              ForEach-Object { Copy-Item $_ package/bin -Force }
+            Copy-Item bin/sam2qc.exe, bin/sam2_ncnn.dll package/bin
             Compress-Archive -Path package/* -DestinationPath $zip -Force
           }
 
@@ -279,6 +260,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: sam2_dml-win-x64-${{ matrix.ep }}
+          name: sam2_ncnn-win-x64-${{ matrix.backend }}
           if-no-files-found: warn
           path: ${{ env.DIST_ZIP }}

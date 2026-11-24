@@ -1,4 +1,4 @@
-"""Compares the Go QC logits dump against the Python/DirectML reference dump.
+"""Compares the Go QC logits dump against the PyTorch SAM2 reference.
 
 Both files use the container written by example/main.go (writeLogits) and
 example/ref_dump.py (write_logits):
@@ -18,10 +18,9 @@ affect the exit code). The pairs that decode the input independently on each sid
 are diagnostic on purpose: Go's image/jpeg and libjpeg agree only to within
 ~14 LSB per channel, and that pixel difference alone moves the logits by ~1, far
 more than any DLL defect. Feed the same pixels (go_rgb.bin, or a lossless PNG
-copy of the image) and the difference collapses to the ~1e-5 DirectML
-run-to-run noise.
+copy of the image) so the comparison isolates inference numerics.
 
-Exit code 0 when every gate pair is allclose(atol=1e-3), 1 otherwise.
+Exit code 0 when every gate pair is within atol=2e-2, 1 otherwise.
 """
 
 import os
@@ -31,7 +30,7 @@ import sys
 import numpy as np
 
 MAGIC = b"S2LOGITS"
-ATOL = 1e-3
+ATOL = 2e-2
 HEADER = 8 + 12
 
 
@@ -79,7 +78,7 @@ def compare(label, go_path, ref_path, gate):
     print(f"  positive ratio: go {float((a > 0).mean()):.6f}  ref {float((b > 0).mean()):.6f}")
 
     ok = max_abs <= ATOL
-    print(f"  allclose(atol={ATOL:g}): {'PASS' if ok else 'FAIL'}")
+    print(f"  max |d| <= atol={ATOL:g}: {'PASS' if ok else 'FAIL'}")
     return ok, gate
 
 

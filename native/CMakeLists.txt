@@ -1,11 +1,9 @@
 cmake_minimum_required(VERSION 3.20)
-project(sam2_dml LANGUAGES CXX)
+project(sam2_ncnn LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Static MSVC runtime would clash with onnxruntime.dll; keep /MD (the default
-# for CMAKE_CXX_FLAGS_RELEASE here) explicitly.
 if(MSVC)
   set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreadedDLL")
 endif()
@@ -14,71 +12,81 @@ if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)
 endif()
 
-set(SAM2_ORT_EP "directml" CACHE STRING "Execution provider to build against: directml, cuda, tensorrt, cpu")
-set_property(CACHE SAM2_ORT_EP PROPERTY STRINGS directml cuda tensorrt cpu)
-string(TOLOWER "${SAM2_ORT_EP}" SAM2_ORT_EP)
+# Backend: pure CPU (default) or Vulkan. Vulkan builds require the Vulkan SDK.
+option(SAM2_VULKAN "Build with the ncnn Vulkan backend" OFF)
 
-# cuda and tensorrt ship as provider plugins inside the single Gpu.Windows package,
-# so they share one extracted directory; directml and cpu have their own packages.
-if(SAM2_ORT_EP STREQUAL "cuda" OR SAM2_ORT_EP STREQUAL "tensorrt")
-  set(_ort_pkg "gpu")
+# ncnn: either a prebuilt install prefix (CI caches it, see
+# .github/workflows/build-and-qc.yml) or fetched from source here.
+set(NCNN_ROOT "" CACHE PATH "Prebuilt ncnn install prefix (include/ + lib/)")
+# 0a2c46bc75 = 2026-08-25 master, the era the converted models were validated
+# against (the 20260827 pyncnn wheel). 20260526 mis-computes the deeper
+# encoder stages; 20261020+ segfault on the decoder graph.
+set(NCNN_TAG "0a2c46bc75987a39d3b044c77385c564e83c0a84" CACHE STRING "Tencent/ncnn git tag used by the FetchContent fallback")
+
+if(NCNN_ROOT)
+  add_library(ncnn STATIC IMPORTED GLOBAL)
+  unset(NCNN_LIB CACHE)
+  find_library(NCNN_LIB NAMES ncnn libncnn PATHS "${NCNN_ROOT}/lib" NO_DEFAULT_PATH REQUIRED)
+  set_target_properties(ncnn PROPERTIES
+    IMPORTED_LOCATION "${NCNN_LIB}"
+    INTERFACE_INCLUDE_DIRECTORIES "${NCNN_ROOT}/include")
 else()
-  set(_ort_pkg "${SAM2_ORT_EP}")
+  include(FetchContent)
+  set(NCNN_VULKAN ${SAM2_VULKAN} CACHE BOOL "" FORCE)
+  set(NCNN_SHARED_LIB OFF CACHE BOOL "" FORCE)      # static: everything lands in sam2_ncnn.dll
+  set(NCNN_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+  set(NCNN_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
+  set(NCNN_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+  set(NCNN_BUILD_BENCHMARK OFF CACHE BOOL "" FORCE)
+  FetchContent_Declare(ncnn
+    GIT_REPOSITORY https://github.com/Tencent/ncnn
+    GIT_TAG ${NCNN_TAG}
+    GIT_SHALLOW TRUE)
+  FetchContent_MakeAvailable(ncnn)
 endif()
-set(ORT_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/third_party/onnxruntime-${_ort_pkg}" CACHE PATH "Extracted ONNX Runtime package for SAM2_ORT_EP=${SAM2_ORT_EP}")
 
-if(NOT EXISTS "${ORT_ROOT}/include/onnxruntime_cxx_api.h")
-  message(FATAL_ERROR "ONNX Runtime headers not found under ${ORT_ROOT}/include - run third_party/fetch_ort.py ${SAM2_ORT_EP} first")
-endif()
-if(NOT EXISTS "${ORT_ROOT}/lib/onnxruntime.lib")
-  message(FATAL_ERROR "onnxruntime.lib not found under ${ORT_ROOT}/lib")
-endif()
-
-add_library(sam2_dml SHARED
-  src/sam2_dml.cpp
-  include/sam2_dml.h
+add_library(sam2_ncnn SHARED
+  src/sam2_ncnn.cpp
+  include/sam2_ncnn.h
 )
 
-string(TOUPPER "${SAM2_ORT_EP}" SAM2_ORT_EP_UPPER)
-target_compile_definitions(sam2_dml PRIVATE
-  SAM2_DML_BUILD=1 SAM2_EP_${SAM2_ORT_EP_UPPER}=1 UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
-target_include_directories(sam2_dml PRIVATE
+if(SAM2_VULKAN)
+  find_package(Vulkan REQUIRED)
+endif()
+
+target_compile_definitions(sam2_ncnn PRIVATE
+  SAM2_NCNN_BUILD=1
+  SAM2_VULKAN=$<BOOL:${SAM2_VULKAN}>
+  _CRT_SECURE_NO_WARNINGS
+  UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
+target_include_directories(sam2_ncnn PRIVATE
   "${CMAKE_CURRENT_SOURCE_DIR}/include"
-  "${ORT_ROOT}/include"
 )
-target_link_libraries(sam2_dml PRIVATE "${ORT_ROOT}/lib/onnxruntime.lib")
-if(SAM2_ORT_EP STREQUAL "directml")
-  target_link_libraries(sam2_dml PRIVATE d3d12 dxgi dxguid)
+target_link_libraries(sam2_ncnn PRIVATE ncnn)
+if(SAM2_VULKAN)
+  target_link_libraries(sam2_ncnn PRIVATE Vulkan::Vulkan)
 endif()
 if(MSVC)
-  target_compile_options(sam2_dml PRIVATE /W4 /permissive- /utf-8 /EHsc /MP)
+  target_compile_options(sam2_ncnn PRIVATE /W4 /permissive- /utf-8 /EHsc /MP)
+  if(NOT SAM2_VULKAN)
+    # the CI-cached libncnn is Vulkan-enabled; delay-load the Vulkan loader so
+    # a CPU-only DLL still has no runtime dependency on vulkan-1.dll. Local
+    # CPU-only ncnn builds have no vulkan imports and skip this.
+    find_library(VULKAN_LOADER_LIB NAMES vulkan-1 libvulkan
+      HINTS "$ENV{Vulkan_SDK}/Lib" "$ENV{VULKAN_SDK}/Lib")
+    if(VULKAN_LOADER_LIB)
+      target_link_libraries(sam2_ncnn PRIVATE "${VULKAN_LOADER_LIB}" delayimp)
+      target_link_options(sam2_ncnn PRIVATE /DELAYLOAD:vulkan-1.dll)
+    endif()
+  endif()
 endif()
 
-set_target_properties(sam2_dml PROPERTIES
-  OUTPUT_NAME "sam2_dml"
+set_target_properties(sam2_ncnn PROPERTIES
+  OUTPUT_NAME "sam2_ncnn"
   PREFIX ""
-  SUFFIX ".dll"
 )
 
-# Copy the runtime DLLs next to the freshly built sam2_dml.dll so the loader
-# resolves them without touching PATH. Only the ones the selected EP actually
-# needs: the shared-provider bridge + that EP's plugin for cuda/tensorrt.
-set(ORT_RUNTIME_DLLS "${ORT_ROOT}/bin/onnxruntime.dll")
-if(SAM2_ORT_EP STREQUAL "directml")
-  list(APPEND ORT_RUNTIME_DLLS
-    "${ORT_ROOT}/bin/DirectML.dll"
-    "${ORT_ROOT}/bin/onnxruntime_providers_shared.dll")
-elseif(SAM2_ORT_EP STREQUAL "cuda" OR SAM2_ORT_EP STREQUAL "tensorrt")
-  list(APPEND ORT_RUNTIME_DLLS
-    "${ORT_ROOT}/bin/onnxruntime_providers_shared.dll"
-    "${ORT_ROOT}/bin/onnxruntime_providers_${SAM2_ORT_EP}.dll")
-endif()
-foreach(dll ${ORT_RUNTIME_DLLS})
-  if(EXISTS "${dll}")
-    add_custom_command(TARGET sam2_dml POST_BUILD
-      COMMAND ${CMAKE_COMMAND} -E copy_if_different "${dll}" "$<TARGET_FILE_DIR:sam2_dml>"
-      COMMENT "Copying ${dll}")
-  else()
-    message(WARNING "runtime DLL missing: ${dll}")
-  endif()
-endforeach()
+# The ncnn runtime is statically linked - the only artifacts are
+# sam2_ncnn.dll plus the model files (sam2_*_fixed.ncnn.param/.bin and
+# sam2_prompt.bin) resolved at runtime via sam2_encoder_create /
+# sam2_decoder_create paths.

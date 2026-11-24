@@ -1,18 +1,13 @@
 #!/usr/bin/env bash
-# Builds the pure-Go QC binary (CGO disabled), stages the three DLLs next to the
-# exe, then runs the QC pass. Everything the run writes lands in example/out/.
+# One-shot local QC: build sam2qc.exe, stage sam2_ncnn.dll + the ncnn models,
+# generate the deterministic test image (or take $1), run the QC pass, and
+# cross-check the logits against the Python reference.
 #
-#   ./example/run_qc.sh                    # deterministic synthetic test image
-#   ./example/run_qc.sh photo.jpg          # your own image instead
+#   ./example/run_qc.sh [image.png]
 #
-# Environment:
-#   SAM2_DLL / SAM2_ENCODER / SAM2_DECODER   override the paths derived below
-#   SAM2_DEVICE                             DirectML adapter index (default 0)
-#   SAM2_RUNS                               timed iterations per stage (default 5)
-#   SAM2_MODEL_DIR                          where the .onnx models live (default: repo root)
-#
-# The three DLLs are taken from native/build/ when present (i.e. after
-# ./native/build.sh), otherwise from bin/ (where the release zip unpacks them).
+# Env: SAM2_MODEL_DIR - directory holding sam2_*_fixed.ncnn.param/.bin and
+#      sam2_prompt.bin (default: repo root); SAM2_RUNS (default 5),
+#      SAM2_EXPECT (default Cpu).
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -23,18 +18,24 @@ LOG="$WORK/qc_output.log"
 MODELS="${SAM2_MODEL_DIR:-$REPO}"
 USER_IMAGE="${1:-}"
 
-have_dlls() { [ -f "$1/sam2_dml.dll" ] && [ -f "$1/onnxruntime.dll" ] && [ -f "$1/DirectML.dll" ]; }
+have_models() {
+  [ -f "$1/sam2_encoder_fixed.ncnn.param" ] && [ -f "$1/sam2_encoder_fixed.ncnn.bin" ] &&
+  [ -f "$1/sam2_decoder_fixed.ncnn.param" ] && [ -f "$1/sam2_decoder_fixed.ncnn.bin" ] &&
+  [ -f "$1/sam2_prompt.bin" ]
+}
 
 DLLSRC=""
-for cand in "$REPO/native/build" "$BIN"; do
-  if have_dlls "$cand"; then DLLSRC="$cand"; break; fi
+for cand in "$REPO/native/build" "$REPO/native/build-ncnn" "$BIN"; do
+  if [ -f "$cand/sam2_ncnn.dll" ]; then DLLSRC="$cand"; break; fi
 done
 if [ -z "$DLLSRC" ]; then
-  cat >&2 <<EOF
-missing sam2_dml.dll / onnxruntime.dll / DirectML.dll
-  looked in: $REPO/native/build and $BIN
-  build them with ./native/build.sh, or unpack the release zip into $BIN
-EOF
+  echo "missing sam2_ncnn.dll; looked in $REPO/native/build(-ncnn) and $BIN" >&2
+  echo "build it with ./native/build.sh" >&2
+  exit 1
+fi
+if ! have_models "$MODELS"; then
+  echo "missing ncnn models in $MODELS (need sam2_*_fixed.ncnn.param/.bin + sam2_prompt.bin)" >&2
+  echo "grab them from the v0.2.0 release assets" >&2
   exit 1
 fi
 
@@ -48,9 +49,11 @@ echo "== build (CGO_ENABLED=0) -> $BIN/sam2qc.exe"
   CGO_ENABLED=0 go build -trimpath -o "$BIN/sam2qc.exe" .
 )
 
-echo "== stage DLLs from $DLLSRC -> $BIN"
-for dll in sam2_dml.dll onnxruntime.dll DirectML.dll; do
-  cp -f "$DLLSRC/$dll" "$BIN/"
+echo "== stage DLL + models -> $BIN"
+cp -f "$DLLSRC/sam2_ncnn.dll" "$BIN/"
+for f in sam2_encoder_fixed.ncnn.param sam2_encoder_fixed.ncnn.bin \
+         sam2_decoder_fixed.ncnn.param sam2_decoder_fixed.ncnn.bin sam2_prompt.bin; do
+  cp -f "$MODELS/$f" "$BIN/"
 done
 
 if [ -n "$USER_IMAGE" ]; then
@@ -59,28 +62,22 @@ if [ -n "$USER_IMAGE" ]; then
   echo "== using caller-supplied image: $IMAGE"
 else
   IMAGE="$WORK/test_image.png"
-  echo "== generate synthetic test image -> $IMAGE"
-  "$BIN/sam2qc.exe" --gen-test-image "$(cygpath -w "$IMAGE")"
+  echo "== generate deterministic test image: $IMAGE"
+  "$BIN/sam2qc.exe" --gen-test-image "$IMAGE"
 fi
 
-# The exe resolves sam2_dml.dll next to itself; point it at the staged copy so
-# the run does not depend on the build tree.
-export SAM2_DLL="${SAM2_DLL:-$(cygpath -w "$BIN/sam2_dml.dll")}"
-export SAM2_ENCODER="${SAM2_ENCODER:-$(cygpath -w "$MODELS/sam2_hiera_small.encoder.onnx")}"
-export SAM2_DECODER="${SAM2_DECODER:-$(cygpath -w "$MODELS/sam2_hiera_small.decoder.onnx")}"
-
-echo "== run"
-set +e
+echo "== QC pass (log: $LOG)"
 (
   cd "$WORK"
-  "$BIN/sam2qc.exe" "$(cygpath -w "$IMAGE")"
-) 2>&1 | tee "$LOG"
-rc="${PIPESTATUS[0]}"
-set -e
+  SAM2_DLL="$(cygpath -w "$BIN/sam2_ncnn.dll")" \
+  SAM2_ENCODER="$(cygpath -w "$BIN/sam2_encoder_fixed.ncnn.param")" \
+  SAM2_DECODER="$(cygpath -w "$BIN/sam2_decoder_fixed.ncnn.param")" \
+  SAM2_RUNS="${SAM2_RUNS:-5}" \
+  SAM2_EXPECT="${SAM2_EXPECT:-Cpu}" \
+    "$BIN/sam2qc.exe" "$IMAGE" | tee "$LOG"
+)
 
-echo
-if [ "$rc" -ne 0 ]; then
-  echo "QC FAILED (exit $rc); see $LOG" >&2
-  exit "$rc"
+if [ "${CROSSCHECK:-1}" != "0" ]; then
+  echo "== cross-check vs Python reference"
+  "$HERE/crosscheck.sh" "$IMAGE"
 fi
-echo "QC PASSED (log: $LOG)"
