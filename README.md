@@ -188,6 +188,7 @@ unless `CROSSCHECK=0`, compares the logits with the Python reference.
 | `SAM2_RUNS` | Timed iterations per stage | `5` |
 | `SAM2_EXPECT` | Required provider substring, `Cpu` or `Vulkan` | `Cpu` |
 | `SAM2_ALLOW_CPU` | Warn instead of failing when Vulkan falls back to Cpu | unset |
+| `SAM2_DEC_PROVIDER` | `cpu` forces the decoder net onto Cpu even in Vulkan builds (works around the multi-point Vulkan bug, see Known issues); `vulkan` requests the GPU | unset (follows the build's backend) |
 | `SAM2_REF_LOGITS` | Existing PyTorch reference for a custom QC image | checked-in reference for the synthetic image |
 | `SAM2_CHECKPOINT` | SAM2 checkpoint used to generate a custom-image reference | `sam2_hiera_small.pt` in the repository root |
 

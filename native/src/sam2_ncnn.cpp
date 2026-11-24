@@ -10,9 +10,12 @@
 // run one at a time. ncnn paths are plain char*; keep them ASCII.
 
 #include "sam2_ncnn.h"
-
 #if !defined(SAM2_VULKAN)
 #define SAM2_VULKAN 0
+#endif
+
+#if defined(_WIN32)
+#include <windows.h>  // GetEnvironmentVariableA: reads the live process block
 #endif
 
 #include <gpu.h>
@@ -463,8 +466,17 @@ sam2_decoder_t* sam2_decoder_create(const char* model_path_utf8, int device_id) 
         // drivers (README "Known issues"), and the decoder is the cheap half
         // of the pipeline, so Cpu there costs little and stays correct.
         // Unset keeps configure_net's default (Vulkan with Cpu fallback).
+        // On Windows read the live process environment block: the CRT's getenv
+        // serves a snapshot taken at CRT init, so a variable a host app set
+        // after startup (e.g. Go's os.Setenv from MyLabel) would be invisible.
         std::string dec_override;
+#if defined(_WIN32)
+        char dec_buf[32];
+        const DWORD dec_n = GetEnvironmentVariableA("SAM2_DEC_PROVIDER", dec_buf, sizeof(dec_buf));
+        if (dec_n > 0 && dec_n < sizeof(dec_buf)) dec_override.assign(dec_buf, dec_n);
+#else
         if (const char* e = std::getenv("SAM2_DEC_PROVIDER")) dec_override = e;
+#endif
         std::transform(dec_override.begin(), dec_override.end(), dec_override.begin(),
                        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
         if (!dec_override.empty() && dec_override != "cpu" && dec_override != "vulkan") {
