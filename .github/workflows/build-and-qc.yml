@@ -49,6 +49,8 @@ env:
   # against. 20260526 mis-computes the deeper encoder stages; 20261020+
   # segfault on the decoder graph.
   NCNN_TAG: "0a2c46bc75987a39d3b044c77385c564e83c0a84"
+  # ncnn model assets are published independently of the binary zips.
+  MODEL_BASE_URL: https://github.com/kisaragychihaya/libsam2_ncnn/releases/download/v0.2.0
 
 jobs:
   # Build static libncnn (Vulkan enabled) once and cache it. A Vulkan-enabled
@@ -172,15 +174,15 @@ jobs:
       - name: Download models
         shell: pwsh
         run: |
-          curl.exe -L --retry 3 --fail -o models/sam2_encoder_fixed.ncnn.param "${{ inputs.encoder_param_url }}"
+          curl.exe -L --retry 3 --fail -o models/sam2_encoder_fixed.ncnn.param "${{ inputs.encoder_param_url || format('{0}/sam2_encoder_fixed.ncnn.param', env.MODEL_BASE_URL) }}"
           if ($LASTEXITCODE -ne 0) { throw "encoder param download failed" }
-          curl.exe -L --retry 3 --fail -o models/sam2_encoder_fixed.ncnn.bin "${{ inputs.encoder_bin_url }}"
+          curl.exe -L --retry 3 --fail -o models/sam2_encoder_fixed.ncnn.bin "${{ inputs.encoder_bin_url || format('{0}/sam2_encoder_fixed.ncnn.bin', env.MODEL_BASE_URL) }}"
           if ($LASTEXITCODE -ne 0) { throw "encoder bin download failed" }
-          curl.exe -L --retry 3 --fail -o models/sam2_decoder_fixed.ncnn.param "${{ inputs.decoder_param_url }}"
+          curl.exe -L --retry 3 --fail -o models/sam2_decoder_fixed.ncnn.param "${{ inputs.decoder_param_url || format('{0}/sam2_decoder_fixed.ncnn.param', env.MODEL_BASE_URL) }}"
           if ($LASTEXITCODE -ne 0) { throw "decoder param download failed" }
-          curl.exe -L --retry 3 --fail -o models/sam2_decoder_fixed.ncnn.bin "${{ inputs.decoder_bin_url }}"
+          curl.exe -L --retry 3 --fail -o models/sam2_decoder_fixed.ncnn.bin "${{ inputs.decoder_bin_url || format('{0}/sam2_decoder_fixed.ncnn.bin', env.MODEL_BASE_URL) }}"
           if ($LASTEXITCODE -ne 0) { throw "decoder bin download failed" }
-          curl.exe -L --retry 3 --fail -o models/sam2_prompt.bin "${{ inputs.prompt_bin_url }}"
+          curl.exe -L --retry 3 --fail -o models/sam2_prompt.bin "${{ inputs.prompt_bin_url || format('{0}/sam2_prompt.bin', env.MODEL_BASE_URL) }}"
           if ($LASTEXITCODE -ne 0) { throw "prompt bin download failed" }
           Get-ChildItem models | Format-Table Name, Length
 
