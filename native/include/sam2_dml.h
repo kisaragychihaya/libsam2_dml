@@ -38,13 +38,14 @@ typedef struct sam2_embedding sam2_embedding_t;
 SAM2_API const char* sam2_get_last_error(void);
 
 /* model_path_utf8: UTF-8 path to sam2_hiera_small.encoder.onnx
- * device_id: DirectML adapter index, 0 = default (discrete) GPU, must be >= 0.
+ * device_id: adapter/device index, 0 = default device, must be >= 0.
  * Performs one dummy warmup inference so the first real call is not penalized
- * by DirectML graph compilation. Returns NULL on failure (see sam2_get_last_error). */
+ * by provider graph compilation. Returns NULL on failure (see sam2_get_last_error). */
 SAM2_API sam2_encoder_t* sam2_encoder_create(const char* model_path_utf8, int device_id);
 SAM2_API void sam2_encoder_destroy(sam2_encoder_t* enc);
 
-/* "DmlExecutionProvider" when the DirectML EP was attached, otherwise
+/* The execution provider attached at build time (e.g. "DmlExecutionProvider",
+ * "CUDAExecutionProvider") when it attached successfully, otherwise
  * "CPUExecutionProvider". Returns "" for a NULL handle. */
 SAM2_API const char* sam2_encoder_provider(const sam2_encoder_t* enc);
 

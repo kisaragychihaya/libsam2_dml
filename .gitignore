@@ -1,10 +1,12 @@
 # --- build outputs -----------------------------------------------------------
 native/build/
+native/build-*/
 native/build.log
 bin/
 
-# ONNX Runtime + DirectML download (the fetch script itself is tracked)
-native/third_party/onnxruntime/
+# ONNX Runtime downloads (the fetch script itself is tracked)
+native/third_party/onnxruntime-*/
+native/third_party/nupkg/
 
 # --- QC / example outputs ----------------------------------------------------
 example/out/

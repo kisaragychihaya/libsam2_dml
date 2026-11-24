@@ -1,4 +1,5 @@
-// sam2_dml.cpp - SAM2 Hiera-Small encoder/decoder on ONNX Runtime + DirectML.
+// sam2_dml.cpp - SAM2 Hiera-Small encoder/decoder on ONNX Runtime, built against
+// one execution provider selected at build time (CMake -DSAM2_ORT_EP=...).
 //
 // Layout of the exported C ABI lives in include/sam2_dml.h. Everything below is
 // the implementation detail: an Ort::Session per handle, a mutex per handle, and
@@ -12,7 +13,9 @@
 #include <onnxruntime_c_api.h>
 #include <onnxruntime_cxx_api.h>
 #include <cpu_provider_factory.h>
-#include <dml_provider_factory.h>
+#if defined(SAM2_EP_DIRECTML)
+#include <dml_provider_factory.h>   // ships only with the DirectML package
+#endif
 
 #include <algorithm>
 #include <array>
@@ -28,7 +31,6 @@ namespace {
 
 constexpr int kInputSize = 1024;       // encoder input H/W
 constexpr int kNumInputChannels = 3;
-constexpr const char* kProviderDml = "DmlExecutionProvider";
 constexpr const char* kProviderCpu = "CPUExecutionProvider";
 
 // ImageNet normalization constants used by anylabeling/SAM2.
@@ -42,6 +44,65 @@ void set_error(const std::string& msg) {
 }
 
 void clear_error() { g_last_error.clear(); }
+
+// Build-time EP selection (CMake -DSAM2_ORT_EP=..., default directml). The EP is
+// attached through the versioned OrtApi table where possible so this file links
+// against every onnxruntime import lib; on a runtime that lacks the EP the call
+// returns an error status, which make_session_options turns into the documented
+// CPU fallback. DirectML has no vtable entry for its legacy attach call, so that
+// one stays a direct import - compiled in only for directml builds, which link
+// the DirectML package anyway.
+#if defined(SAM2_EP_CUDA)
+constexpr const char* kProviderPrimary = "CUDAExecutionProvider";
+constexpr const char* kEpName = "CUDA";
+
+OrtStatus* attach_primary_ep(Ort::SessionOptions& options, int device_id) {
+    const OrtApi& api = Ort::GetApi();
+    OrtCUDAProviderOptionsV2* opts = nullptr;
+    OrtStatus* status = api.CreateCUDAProviderOptions(&opts);
+    if (status == nullptr) {
+        const char* keys[] = {"device_id"};
+        const char* values[] = {std::to_string(device_id).c_str()};
+        status = api.UpdateCUDAProviderOptions(opts, keys, values, 1);
+        if (status == nullptr) {
+            status = api.SessionOptionsAppendExecutionProvider_CUDA_V2(options, opts);
+        }
+        api.ReleaseCUDAProviderOptions(opts);
+    }
+    return status;
+}
+#elif defined(SAM2_EP_TENSORRT)
+constexpr const char* kProviderPrimary = "TensorrtExecutionProvider";
+constexpr const char* kEpName = "TensorRT";
+
+OrtStatus* attach_primary_ep(Ort::SessionOptions& options, int device_id) {
+    const OrtApi& api = Ort::GetApi();
+    OrtTensorRTProviderOptionsV2* opts = nullptr;
+    OrtStatus* status = api.CreateTensorRTProviderOptions(&opts);
+    if (status == nullptr) {
+        const char* keys[] = {"device_id"};
+        const char* values[] = {std::to_string(device_id).c_str()};
+        status = api.UpdateTensorRTProviderOptions(opts, keys, values, 1);
+        if (status == nullptr) {
+            status = api.SessionOptionsAppendExecutionProvider_TensorRT_V2(options, opts);
+        }
+        api.ReleaseTensorRTProviderOptions(opts);
+    }
+    return status;
+}
+#elif defined(SAM2_EP_CPU)
+constexpr const char* kProviderPrimary = "CPUExecutionProvider";
+constexpr const char* kEpName = "CPU";
+
+OrtStatus* attach_primary_ep(Ort::SessionOptions&, int) { return nullptr; }  // CPU is appended below
+#else  // SAM2_EP_DIRECTML
+constexpr const char* kProviderPrimary = "DmlExecutionProvider";
+constexpr const char* kEpName = "DirectML";
+
+OrtStatus* attach_primary_ep(Ort::SessionOptions& options, int device_id) {
+    return OrtSessionOptionsAppendExecutionProvider_DML(options, device_id);
+}
+#endif
 
 std::wstring utf8_to_wide(const char* utf8) {
     if (utf8 == nullptr) return std::wstring();
@@ -94,8 +155,8 @@ std::vector<std::string> input_names(Ort::Session& session, Ort::AllocatorWithDe
     return names;
 }
 
-// Builds the session options: DirectML first (falls back to CPU), then CPU.
-// Also records which provider actually got attached.
+// Builds the session options: the build-time EP first (falls back to CPU),
+// then CPU. Also records which provider actually got attached.
 std::string make_session_options(Ort::SessionOptions& options, int device_id,
                                  const std::string& tag) {
     options.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
@@ -107,18 +168,18 @@ std::string make_session_options(Ort::SessionOptions& options, int device_id,
         return std::string();
     }
 
-    OrtStatus* status = OrtSessionOptionsAppendExecutionProvider_DML(options, device_id);
+    OrtStatus* status = attach_primary_ep(options, device_id);
     if (status != nullptr) {
         const char* msg = Ort::GetApi().GetErrorMessage(status);
         const std::string detail = msg ? msg : "unknown error";
         Ort::GetApi().ReleaseStatus(status);
         // Keep going on CPU; the failure is reported by sam2_*_provider() as
         // "CPUExecutionProvider" and surfaces in the warmup log if it also fails.
-        set_error(tag + ": DirectML EP unavailable (device_id=" + std::to_string(device_id) +
+        set_error(tag + ": " + kEpName + " EP unavailable (device_id=" + std::to_string(device_id) +
                   "): " + detail);
         provider = kProviderCpu;
     } else {
-        provider = kProviderDml;
+        provider = kProviderPrimary;
     }
     options.AppendExecutionProvider_CPU(1);
     return provider;
@@ -264,7 +325,7 @@ sam2_encoder_t* sam2_encoder_create(const char* model_path_utf8, int device_id) 
         enc->out_name_ptrs.reserve(enc->out_names.size());
         for (const std::string& s : enc->out_names) enc->out_name_ptrs.push_back(s.c_str());
 
-        // Warmup: compile the DirectML graph with a zero image so the first real
+        // Warmup: compile the provider graph with a zero image so the first real
         // encode() call is not charged for graph compilation.
         std::vector<float> zeros(static_cast<size_t>(kNumInputChannels) * kInputSize * kInputSize, 0.0f);
         const std::array<int64_t, 4> shape{1, kNumInputChannels, kInputSize, kInputSize};
@@ -278,9 +339,9 @@ sam2_encoder_t* sam2_encoder_create(const char* model_path_utf8, int device_id) 
             set_error("sam2_encoder_create: warmup returned " + std::to_string(outs.size()) + " outputs");
             return nullptr;
         }
-        // Keep the DirectML failure text if we fell back to CPU so callers can
+        // Keep the primary-EP failure text if we fell back to CPU so callers can
         // read sam2_get_last_error() to learn why.
-        if (enc->provider == kProviderDml) clear_error();
+        if (enc->provider == kProviderPrimary) clear_error();
         return enc.release();
     } catch (const Ort::Exception& e) {
         set_error(std::string("sam2_encoder_create: ") + e.what());
@@ -442,7 +503,7 @@ sam2_decoder_t* sam2_decoder_create(const char* model_path_utf8, int device_id) 
             set_error("sam2_decoder_create: warmup returned " + std::to_string(outs.size()) + " outputs");
             return nullptr;
         }
-        if (dec->provider == kProviderDml) clear_error();
+        if (dec->provider == kProviderPrimary) clear_error();
         return dec.release();
     } catch (const Ort::Exception& e) {
         set_error(std::string("sam2_decoder_create: ") + e.what());

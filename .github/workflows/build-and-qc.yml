@@ -1,7 +1,7 @@
 name: build-and-qc
 
-# Manual only: this job downloads ~175 MB of model weights, builds the DLL with
-# MSVC, and runs the DirectML QC pass. It never runs on push/PR.
+# Manual only: each matrix leg downloads ~175 MB of model weights, builds the DLL
+# with MSVC, and runs the QC pass. It never runs on push/PR.
 on:
   workflow_dispatch:
     inputs:
@@ -18,12 +18,12 @@ on:
         required: false
         default: "2"
       require_dml:
-        description: Fail when the DLL reports a non-DirectML provider (WARP software adapter still counts as DirectML)
+        description: Fail when the directml leg reports a non-DirectML provider (WARP software adapter still counts as DirectML)
         type: boolean
         required: false
         default: true
       version:
-        description: Dist zip suffix, i.e. dist-<version>.zip (empty = git describe --tags)
+        description: Dist zip suffix, i.e. dist-<ep>-<version>.zip (empty = git describe --tags)
         required: false
         default: ""
 
@@ -36,9 +36,16 @@ concurrency:
 
 jobs:
   build-and-qc:
-    name: build + DirectML QC (windows-latest)
+    name: "${{ matrix.ep }} (windows-latest)"
     runs-on: windows-latest
     timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        # Hosted runners have no GPU and no NVIDIA stack, so cuda/tensorrt legs
+        # attach-fail and run the QC on the CPU fallback; they still gate the
+        # build, the provider reporting, and the Go-vs-Python numerics.
+        ep: [directml, cuda, tensorrt, cpu]
 
     steps:
       - uses: actions/checkout@v4
@@ -55,8 +62,8 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Fetch ONNX Runtime DirectML 1.24.4 + DirectML 1.15.4
-        run: python native/third_party/fetch_ort_dml.py
+      - name: Fetch ONNX Runtime package (EP=${{ matrix.ep }})
+        run: python native/third_party/fetch_ort.py ${{ matrix.ep }}
 
       - uses: ilammy/msvc-dev-cmd@v1
         with:
@@ -65,7 +72,7 @@ jobs:
       - name: Configure + build sam2_dml.dll (CMake + Ninja, Release x64)
         shell: pwsh
         run: |
-          cmake -S native -B native/build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake -S native -B native/build -G Ninja -DCMAKE_BUILD_TYPE=Release -DSAM2_ORT_EP=${{ matrix.ep }}
           if ($LASTEXITCODE -ne 0) { throw "cmake configure failed" }
           cmake --build native/build
           if ($LASTEXITCODE -ne 0) { throw "cmake build failed" }
@@ -84,7 +91,9 @@ jobs:
       - name: Stage DLLs next to the exe
         shell: pwsh
         run: |
-          Copy-Item native/build/sam2_dml.dll, native/build/onnxruntime.dll, native/build/DirectML.dll bin -Force
+          Copy-Item native/build/sam2_dml.dll, native/build/onnxruntime.dll bin -Force
+          Get-ChildItem native/build/onnxruntime_providers_*.dll, native/build/DirectML.dll -ErrorAction SilentlyContinue |
+            ForEach-Object { Copy-Item $_ bin -Force }
           Get-ChildItem bin | Format-Table Name, Length
 
       - name: Download models
@@ -111,8 +120,10 @@ jobs:
       # Hosted runners have no GPU. DirectML can still run on the WARP software
       # adapter, but only if the adapter ORT enumerates at the requested
       # device_id is D3D12-capable. Probe the first four ids and export whichever
-      # one reports DmlExecutionProvider for the real QC pass below.
+      # one reports DmlExecutionProvider for the real QC pass below. Meaningful
+      # for the directml leg only; other EPs use device_id 0.
       - name: Probe DirectML adapter ids
+        if: matrix.ep == 'directml'
         shell: pwsh
         env:
           SAM2_DLL: ${{ github.workspace }}\bin\sam2_dml.dll
@@ -153,10 +164,21 @@ jobs:
           SAM2_ENCODER: ${{ github.workspace }}\models\sam2_hiera_small.encoder.onnx
           SAM2_DECODER: ${{ github.workspace }}\models\sam2_hiera_small.decoder.onnx
           SAM2_RUNS: ${{ inputs.runs }}
+          SAM2_EXPECT: ${{ matrix.ep == 'directml' && 'Dml' || (matrix.ep == 'cuda' && 'Cuda' || (matrix.ep == 'tensorrt' && 'Tensorrt' || 'Cpu')) }}
         run: |
           $device = if ($env:SAM2_DEVICE) { $env:SAM2_DEVICE } else { "0" }
-          $requireDml = "${{ inputs.require_dml }}"
-          Write-Host "SAM2_DEVICE=$device (require_dml=$requireDml)"
+          if ("${{ matrix.ep }}" -eq "directml") {
+            $requireDml = "${{ inputs.require_dml }}"
+          } else {
+            # No GPU/NVIDIA stack on hosted runners: the leg's EP cannot attach,
+            # so the CPU fallback is the expected mode. sam2qc.exe still fails on
+            # its own if the provider string does not match, a CPU fallback can
+            # never pass as the expected EP, and the numerical cross-check below
+            # gates the run.
+            $requireDml = "false"
+            $env:SAM2_ALLOW_CPU = "1"
+          }
+          Write-Host "SAM2_DEVICE=$device (ep=${{ matrix.ep }}, require_dml=$requireDml)"
           if ($requireDml -ne "true") {
             # Explicit, logged escape hatch: keep the numerical cross-check
             # running even when DirectML is unavailable. Never used by default.
@@ -176,9 +198,10 @@ jobs:
             Write-Host "::warning::sam2qc.exe exited with $rc but require_dml=false, continuing to the numerical cross-check"
           }
 
-      - name: Assert DirectML provider
+      - name: Assert provider
         shell: pwsh
         run: |
+          $expect = @{ directml = 'Dml'; cuda = 'Cuda'; tensorrt = 'Tensorrt'; cpu = 'Cpu' }['${{ matrix.ep }}']
           $log = Get-Content example/out/qc_output.log -Raw
           $eps = [regex]::Matches($log, '(?m)^(?<stage>encoder|decoder) provider\s*:\s*(?<p>\S+)')
           $summary = @()
@@ -188,11 +211,18 @@ jobs:
             $summary += $line
           }
           if ($eps.Count -ne 2) { throw "expected 2 provider lines in the QC log, found $($eps.Count)" }
-          $nonDml = @($eps | Where-Object { $_.Groups['p'].Value -notmatch 'Dml' })
-          if ("${{ inputs.require_dml }}" -eq "true" -and $nonDml.Count -gt 0) {
-            throw "DirectML was required but the DLL fell back: $($nonDml | ForEach-Object { $_.Groups['p'].Value -join ', ' })"
+          $fallback = @($eps | Where-Object { $_.Groups['p'].Value -notmatch $expect })
+          if ($fallback.Count -gt 0) {
+            $names = $fallback | ForEach-Object { $_.Groups['p'].Value }
+            if ("${{ matrix.ep }}" -eq "directml" -and "${{ inputs.require_dml }}" -eq "true") {
+              throw "DirectML was required but the DLL fell back: $($names -join ', ')"
+            }
+            # cuda/tensorrt on GPU-less hosted runners always land here; the
+            # numerical cross-check is the gate for those legs.
+            Write-Host "::warning::${{ matrix.ep }} EP did not attach ($($names -join ', ')) - expected on hosted runners without a GPU/NVIDIA stack"
+            $summary += "note: fell back to $($names -join ', ') - expected on hosted runners"
           }
-          @("## Provider", '```', $summary, '```') | Add-Content -Path $env:GITHUB_STEP_SUMMARY
+          @("## Provider (${{ matrix.ep }})", '```', $summary, '```') | Add-Content -Path $env:GITHUB_STEP_SUMMARY
 
       - name: Install Python reference deps
         run: python -m pip install --upgrade onnxruntime-directml pillow numpy
@@ -231,13 +261,17 @@ jobs:
         run: |
           $version = "$env:VERSION_INPUT"
           if (-not $version) { $version = git describe --tags --always }
-          $zip = "dist-$version.zip"
+          $zip = "dist-${{ matrix.ep }}-$version.zip"
           "DIST_ZIP=$zip" | Add-Content -Path $env:GITHUB_ENV
           # Missing bin\ means an early build failure; leave the zip absent so
           # the upload step warns, same as the old per-file behavior.
           if (Test-Path bin/sam2qc.exe) {
             New-Item -ItemType Directory -Force package/bin | Out-Null
-            Copy-Item bin/sam2qc.exe, bin/sam2_dml.dll, bin/onnxruntime.dll, bin/DirectML.dll package/bin
+            Copy-Item bin/sam2qc.exe, bin/sam2_dml.dll, bin/onnxruntime.dll package/bin
+            # Per-EP extras: onnxruntime_providers_*.dll for cuda/tensorrt,
+            # DirectML.dll for directml; absent legs simply copy nothing.
+            Get-ChildItem bin/onnxruntime_providers_*.dll, bin/DirectML.dll -ErrorAction SilentlyContinue |
+              ForEach-Object { Copy-Item $_ package/bin -Force }
             Compress-Archive -Path package/* -DestinationPath $zip -Force
           }
 
@@ -245,6 +279,6 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: sam2_dml-win-x64-qc
+          name: sam2_dml-win-x64-${{ matrix.ep }}
           if-no-files-found: warn
           path: ${{ env.DIST_ZIP }}

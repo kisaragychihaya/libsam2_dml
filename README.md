@@ -30,18 +30,19 @@ them against a Python/`onnxruntime-directml` reference — the same check CI run
 | `sam2_hiera_small.decoder.onnx` | SAM2 Hiera-Small mask decoder, points/labels/embeddings in, mask logits + IoU out (20 MB). |
 
 The two `.onnx` files are too large for git (>100 MB) and are published as release assets only.
-`native/third_party/fetch_ort_dml.py` re-downloads the ONNX Runtime DirectML and DirectML NuGet
-packages (`1.24.4` / `1.15.4`) to make the native build reproducible.
+`native/third_party/fetch_ort.py` re-downloads the ONNX Runtime NuGet package(s) for the chosen
+execution provider (`directml` by default, also `cuda`, `tensorrt`, `cpu`) to make the native
+build reproducible.
 
 ## Repository layout
 
 ```
 native/
   include/sam2_dml.h        C ABI, 1:1 mapped by the Go client's unsafe layout
-  src/sam2_dml.cpp          implementation (Ort::Session + DirectML EP + preprocessing)
-  CMakeLists.txt            MSVC, C++17, /MD, Ninja
-  build.sh                  builds native/build/sam2_dml.dll and stages the runtime DLLs
-  third_party/fetch_ort_dml.py   downloads/extracts ORT-DML + DirectML (stdlib only)
+  src/sam2_dml.cpp          implementation (Ort::Session + build-time EP + preprocessing)
+  CMakeLists.txt            MSVC, C++17, /MD, Ninja; -DSAM2_ORT_EP=directml|cuda|tensorrt|cpu
+  build.sh                  builds native/build/sam2_dml.dll and stages the runtime DLLs (EP=cuda ...)
+  third_party/fetch_ort.py   downloads/extracts the ORT package for one or more EPs (stdlib only)
 example/
   main.go                   pure-Go QC client (syscall FFI), also generates the test image
   go.mod                    module libsam2_dml/example
@@ -61,7 +62,7 @@ const char*          sam2_get_last_error(void);
 
 sam2_encoder_t*      sam2_encoder_create(const char* model_path_utf8, int device_id);
 void                 sam2_encoder_destroy(sam2_encoder_t*);
-const char*          sam2_encoder_provider(const sam2_encoder_t*);   // "DmlExecutionProvider" / "CPUExecutionProvider"
+const char*          sam2_encoder_provider(const sam2_encoder_t*);   // attached EP name, e.g. "DmlExecutionProvider" / "CUDAExecutionProvider", else "CPUExecutionProvider"
 sam2_embedding_t*    sam2_encoder_encode(sam2_encoder_t*, const unsigned char* rgb,
                                          int width, int height, int stride);
 void                 sam2_embedding_destroy(sam2_embedding_t*);
@@ -93,7 +94,7 @@ Notes that matter for FFI clients:
   `example/main.go` asserts size and offsets in `checkLayout()` before calling anything.
 - All returned pointers are owned by the DLL; free them with the matching `*_destroy` function.
 - `sam2_encoder_create()` performs one dummy warmup inference, so the first real encode is not
-  charged for DirectML graph compilation. Same for `sam2_decoder_create()`.
+  charged for provider graph compilation. Same for `sam2_decoder_create()`.
 - Handles are thread-safe but serialized: concurrent calls on the same handle run one at a time.
 - Preprocessing is fixed to the anylabeling/SAM2 recipe: half-pixel bilinear resize to 1024x1024,
   `/255`, ImageNet mean/std, NCHW float32. No other preprocessing is available through this ABI.
@@ -105,21 +106,47 @@ Git Bash. `build.sh` finds `vcvars64.bat`, `cmake` and `ninja` through `vswhere`
 pin them with `VCVARS=`, `CMAKE=`, `NINJA=`.
 
 ```bash
-python native/third_party/fetch_ort_dml.py     # ORT-DML 1.24.4 + DirectML 1.15.4 (~240 MB, cached)
-./native/build.sh                              # -> native/build/sam2_dml.dll + runtime DLLs
+python native/third_party/fetch_ort.py     # directml (default): ORT-DML 1.24.4 + DirectML 1.15.4 (~240 MB, cached)
+./native/build.sh                          # -> native/build/sam2_dml.dll + runtime DLLs
 ```
 
 Equivalent manual steps:
 
 ```bat
-python native\third_party\fetch_ort_dml.py
+python native\third_party\fetch_ort.py
 cmake -S native -B native\build -G Ninja -DCMAKE_BUILD_TYPE=Release
 cmake --build native\build
 ```
 
-`native/build/` then contains `sam2_dml.dll`, `onnxruntime.dll`, `DirectML.dll` and
-`onnxruntime_providers_shared.dll`. Keep the DLLs together — the loader resolves them from the
-directory of `sam2_dml.dll`, and no `PATH` change is required.
+`native/build/` then contains `sam2_dml.dll` next to the runtime DLLs the selected EP needs
+(DirectML build: `onnxruntime.dll`, `DirectML.dll`, `onnxruntime_providers_shared.dll`). Keep
+the DLLs together — the loader resolves them from the directory of `sam2_dml.dll`, and no
+`PATH` change is required.
+
+### Other execution providers
+
+`-DSAM2_ORT_EP=` (or `EP=... ./native/build.sh`) selects the EP at configure time; the same
+source builds against all of them. `cuda` and `tensorrt` are provider plugins inside the single
+`Microsoft.ML.OnnxRuntime.Gpu.Windows` package, so one `fetch_ort.py cuda` covers both.
+
+| `SAM2_ORT_EP` | Fetched NuGet package(s) | Provider string when attached | Extra runtime requirements |
+| --- | --- | --- | --- |
+| `directml` (default) | Microsoft.ML.OnnxRuntime.DirectML + Microsoft.AI.DirectML 1.15.4 | `DmlExecutionProvider` | DirectML-capable adapter (WARP counts) |
+| `cuda` | Microsoft.ML.OnnxRuntime.Gpu.Windows + base package (headers) | `CUDAExecutionProvider` | NVIDIA CUDA 12.x + cuDNN 9.x DLLs on `PATH` |
+| `tensorrt` | same as `cuda` | `TensorrtExecutionProvider` | CUDA + cuDNN + TensorRT DLLs on `PATH` |
+| `cpu` | Microsoft.ML.OnnxRuntime | `CPUExecutionProvider` | none |
+
+```bat
+python native\third_party\fetch_ort.py cuda
+cmake -S native -B native\build-cuda -G Ninja -DCMAKE_BUILD_TYPE=Release -DSAM2_ORT_EP=cuda
+cmake --build native\build-cuda
+```
+
+The ORT NuGet packages do not redistribute NVIDIA's libraries, so those stay a target-machine
+prerequisite. OpenVINO is not distributed through the official ORT NuGet packages and is not
+supported. Whatever the build-time EP, a runtime attach failure falls back to CPU and
+`sam2_encoder_provider()` / `sam2_get_last_error()` report it, exactly like the DirectML path —
+and the CI workflow (`build-and-qc.yml`) keeps building and gating on `directml` only.
 
 ## Go example (CGO_ENABLED=0)
 
@@ -149,9 +176,10 @@ exe. Model paths default to the repo root; DLL/model paths can be overridden:
 | `SAM2_DLL` | path to `sam2_dml.dll` | next to `sam2qc.exe` |
 | `SAM2_ENCODER` | encoder ONNX | next to the exe, then one/two dirs up (repo root) |
 | `SAM2_DECODER` | decoder ONNX | same |
-| `SAM2_DEVICE` | DirectML adapter index | `0` |
+| `SAM2_DEVICE` | adapter/device index | `0` |
 | `SAM2_RUNS` | timed iterations per stage | `5` |
-| `SAM2_ALLOW_CPU` | continue with a warning instead of failing when DirectML is unavailable | unset (non-DML is a failure) |
+| `SAM2_EXPECT` | provider substring that must match, e.g. `Dml` / `Cuda` / `Tensorrt` / `Cpu` | `Dml` |
+| `SAM2_ALLOW_CPU` | continue with a warning instead of failing when the expected EP is unavailable | unset (mismatch is a failure) |
 | `SAM2_MODEL_DIR` | where `run_qc.sh`/`crosscheck.sh` look for the models | repo root |
 
 The QC binary takes one image and writes into the current directory:
@@ -211,16 +239,21 @@ binary IoU between Go and Python masks 1.0.
 
 ### CI
 
-`.github/workflows/build-and-qc.yml` is `workflow_dispatch` only. On `windows-latest` it fetches
-ORT-DML, builds the DLL with MSVC + CMake + Ninja, builds the Go client with `CGO_ENABLED=0`,
-downloads both models (URLs are inputs, defaults point at this repo's `v0.1.0` assets), generates
-the synthetic image, runs the QC pass, asserts `DmlExecutionProvider`, then runs `ref_dump.py` +
-`compare.py` with `atol=1e-3` (a failing comparison fails the job) and uploads a single
-`dist-<version>.zip` artifact containing just `bin/` (exe + DLLs). Inputs: `encoder_url`, `decoder_url`,
-`runs` (default 2), `require_dml`, `version` (zip suffix; empty defaults to `git describe --tags`)
-(default true — a DirectML fallback to CPU fails the job rather than silently passing). Before the QC
-pass it inventories the runner's display adapters and probes `SAM2_DEVICE=0..3`, so a DirectML device
-reachable only at another adapter index is still found.
+`.github/workflows/build-and-qc.yml` is `workflow_dispatch` only and runs a matrix over
+`SAM2_ORT_EP`: `directml`, `cuda`, `tensorrt`, `cpu` (one leg each on `windows-latest`). Every
+leg fetches its ORT package with `fetch_ort.py <ep>`, builds the DLL with MSVC + CMake + Ninja
+(`-DSAM2_ORT_EP=<ep>`), builds the Go client with `CGO_ENABLED=0`, downloads both models (URLs
+are inputs, defaults point at this repo's `v0.1.0` assets), generates the synthetic image, and
+runs the QC pass, then `ref_dump.py` + `compare.py` with `atol=1e-3` (a failing comparison
+fails the leg). Hosted runners have no GPU and no NVIDIA stack, so the `cuda`/`tensorrt` legs
+attach-fail and run the QC on the CPU fallback (`SAM2_ALLOW_CPU=1`, expected and warned) while
+still gating the build, the provider reporting, and the numerics; the `cpu` leg runs natively
+on CPU. The `directml` leg, with the default `require_dml=true` (a DirectML fallback to CPU
+fails the leg rather than silently passing), additionally probes `SAM2_DEVICE=0..3` before the
+QC pass so a DirectML device reachable only at another adapter index is still found. Each leg
+uploads a single `dist-<ep>-<version>.zip` artifact containing just `bin/` (exe + the DLLs
+that leg needs); `version` is an input, empty defaults to `git describe --tags`. Other inputs:
+`encoder_url`, `decoder_url`, `runs` (default 2).
 
 About the WARP case: hosted runners have no GPU, and DirectML is *supposed* to fall back to the WARP
 software adapter there (which would still report `DmlExecutionProvider`, just slower). On the

@@ -4,10 +4,12 @@
 # that vcvars64.bat can set up the MSVC environment.
 #
 #   ./native/build.sh                      # clean rebuild, log -> native/build.log
+#   EP=cuda ./native/build.sh              # build against another execution provider
 #   VCVARS=/d/vs/vcvars64.bat ./native/build.sh
 #
-# Overrides: VCVARS, CMAKE, NINJA, ORT_ROOT (extracted ONNX Runtime DirectML
-# package, default native/third_party/onnxruntime).
+# Overrides: VCVARS, CMAKE, NINJA, EP (directml default; cuda/tensorrt/cpu),
+# ORT_ROOT (extracted ONNX Runtime package; defaults to the matching
+# native/third_party/onnxruntime-* directory for EP).
 #
 # Tool discovery order: $VCVARS / $CMAKE / $NINJA, then the Visual Studio
 # installation reported by vswhere, then whatever is on PATH. When vcvars64.bat
@@ -18,7 +20,12 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD="$ROOT/build"
 LOG="$ROOT/build.log"
-ORT="${ORT_ROOT:-$ROOT/third_party/onnxruntime}"
+EP="${EP:-directml}"
+case "$EP" in
+  cuda|tensorrt) _ort_pkg="gpu" ;;
+  *)             _ort_pkg="$EP" ;;
+esac
+ORT="${ORT_ROOT:-$ROOT/third_party/onnxruntime-$_ort_pkg}"
 
 find_vs() {
   local vswhere='/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe'
@@ -69,7 +76,7 @@ fi
 [ -n "$CMAKE" ] || { echo "cmake not found; set CMAKE=/path/to/cmake" >&2; exit 1; }
 [ -n "$NINJA" ] || { echo "ninja not found; set NINJA=/path/to/ninja" >&2; exit 1; }
 for f in "$ORT/include/onnxruntime_cxx_api.h" "$ORT/lib/onnxruntime.lib" "$ORT/bin/onnxruntime.dll"; do
-  [ -f "$f" ] || { echo "missing ONNX Runtime file: $f (run: python native/third_party/fetch_ort_dml.py)" >&2; exit 1; }
+  [ -f "$f" ] || { echo "missing ONNX Runtime file: $f (run: python native/third_party/fetch_ort.py $EP)" >&2; exit 1; }
 done
 if [ -z "$VCVARS" ] && ! command -v cl >/dev/null 2>&1; then
   echo "no vcvars64.bat found and cl.exe is not on PATH; set VCVARS=/path/to/vcvars64.bat" >&2
@@ -91,8 +98,8 @@ BAT="$BUILD/_build.cmd"
   if [ -n "$VCVARS" ]; then
     printf 'call "%s" >nul || exit /b 1\r\n' "$VCVARS"
   fi
-  printf '"%s" -S "%s" -B "%s" -G Ninja -DCMAKE_BUILD_TYPE=Release -DORT_ROOT="%s" -DCMAKE_MAKE_PROGRAM="%s" || exit /b 1\r\n' \
-    "$CMAKE" "$WIN_ROOT" "$WIN_BUILD" "$WIN_ORT" "$NINJA"
+  printf '"%s" -S "%s" -B "%s" -G Ninja -DCMAKE_BUILD_TYPE=Release -DSAM2_ORT_EP="%s" -DORT_ROOT="%s" -DCMAKE_MAKE_PROGRAM="%s" || exit /b 1\r\n' \
+    "$CMAKE" "$WIN_ROOT" "$WIN_BUILD" "$EP" "$WIN_ORT" "$NINJA"
   printf '"%s" -C "%s" || exit /b 1\r\n' "$NINJA" "$WIN_BUILD"
 } > "$BAT"
 
@@ -107,9 +114,12 @@ if [ "$rc" -ne 0 ]; then
   exit "$rc"
 fi
 
-for dll in onnxruntime.dll DirectML.dll onnxruntime_providers_shared.dll; do
-  if [ -f "$ORT/bin/$dll" ]; then cp -f "$ORT/bin/$dll" "$BUILD/"; fi
-done
+# Same set CMake copies: the shared bridge + the selected EP's plugin (+ DirectML).
+stage() { [ -f "$ORT/bin/$1" ] && cp -f "$ORT/bin/$1" "$BUILD/"; }
+stage onnxruntime.dll
+stage onnxruntime_providers_shared.dll
+stage "onnxruntime_providers_$EP.dll"
+stage DirectML.dll
 
 echo "== staged artifacts"
-ls -la "$BUILD"/sam2_dml.dll "$BUILD"/onnxruntime.dll "$BUILD"/DirectML.dll
+ls -la "$BUILD"/sam2_dml.dll "$BUILD"/onnxruntime.dll

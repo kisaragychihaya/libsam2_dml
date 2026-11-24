@@ -11,10 +11,12 @@
 //	SAM2_DLL       absolute path of sam2_dml.dll   (default: next to the exe)
 //	SAM2_ENCODER   absolute path of sam2_hiera_small.encoder.onnx
 //	SAM2_DECODER   absolute path of sam2_hiera_small.decoder.onnx
-//	SAM2_DEVICE    DirectML adapter index (default 0)
+//	SAM2_DEVICE    adapter/device index (default 0)
 //	SAM2_RUNS      timed iterations per stage (default 5)
-//	SAM2_ALLOW_CPU continue (with a warning) instead of failing when DirectML is
-//	                unavailable and the DLL fell back to CPUExecutionProvider
+//	SAM2_EXPECT    case-insensitive substring the provider string must contain,
+//	                e.g. "Dml" / "Cuda" / "Tensorrt" / "Cpu" (default "Dml")
+//	SAM2_ALLOW_CPU continue (with a warning) instead of failing when the expected
+//	                EP is unavailable and the DLL fell back to CPUExecutionProvider
 //
 // Artifacts written to the current directory:
 //
@@ -415,7 +417,7 @@ func usage() error {
 	return fmt.Errorf("usage:\n"+
 		"  %s --gen-test-image <out.png>   write the deterministic synthetic test image\n"+
 		"  %s <image.jpg|image.png>        run the QC pass\n"+
-		"env SAM2_DLL/SAM2_ENCODER/SAM2_DECODER/SAM2_DEVICE/SAM2_RUNS override defaults",
+		"env SAM2_DLL/SAM2_ENCODER/SAM2_DECODER/SAM2_DEVICE/SAM2_RUNS/SAM2_EXPECT/SAM2_ALLOW_CPU override defaults",
 		self, self)
 }
 
@@ -459,6 +461,7 @@ func run() error {
 	}
 	runs := timedRuns()
 	allowCPU := truthy(os.Getenv("SAM2_ALLOW_CPU"))
+	expected := valueOr("SAM2_EXPECT", "Dml")
 
 	for _, p := range []string{imagePath, encoderPath, decoderPath} {
 		if _, statErr := os.Stat(p); statErr != nil {
@@ -505,11 +508,11 @@ func run() error {
 	if msg := lib.lastError(); msg != "" {
 		fmt.Printf("encoder note     : %s\n", msg)
 	}
-	if !containsFold(encProvider, "Dml") {
+	if !containsFold(encProvider, expected) {
 		if !allowCPU {
-			return fmt.Errorf("encoder is NOT running on DirectML (provider=%q)", encProvider)
+			return fmt.Errorf("encoder is NOT running on %s (provider=%q)", expected, encProvider)
 		}
-		fmt.Printf("WARNING          : encoder is not on DirectML (SAM2_ALLOW_CPU=1), timings below are CPU numbers\n")
+		fmt.Printf("WARNING          : encoder is not on %s (SAM2_ALLOW_CPU=1), timings below are CPU numbers\n", expected)
 	}
 
 	// Encoder: 1 warmup + `runs` timed calls. The last embedding is kept for the
@@ -568,11 +571,11 @@ func run() error {
 
 	decProvider := lib.providerString(lib.decoderProvider, decHandle)
 	fmt.Printf("decoder provider : %s\n", decProvider)
-	if !containsFold(decProvider, "Dml") {
+	if !containsFold(decProvider, expected) {
 		if !allowCPU {
-			return fmt.Errorf("decoder is NOT running on DirectML (provider=%q)", decProvider)
+			return fmt.Errorf("decoder is NOT running on %s (provider=%q)", expected, decProvider)
 		}
-		fmt.Printf("WARNING          : decoder is not on DirectML (SAM2_ALLOW_CPU=1), timings below are CPU numbers\n")
+		fmt.Printf("WARNING          : decoder is not on %s (SAM2_ALLOW_CPU=1), timings below are CPU numbers\n", expected)
 	}
 
 	// Single positive prompt at the image center, in original pixel coordinates.
@@ -667,9 +670,9 @@ func run() error {
 	if err := writeMaskPNG("mask_output.png", bestMask, int(r.maskW), int(r.maskH), img.width, img.height); err != nil {
 		return fmt.Errorf("write mask_output.png: %w", err)
 	}
-	onDml := containsFold(encProvider, "Dml") && containsFold(decProvider, "Dml")
-	if onDml {
-		fmt.Println("QC OK: DirectML encoder+decoder reached through pure-Go FFI")
+	onExpected := containsFold(encProvider, expected) && containsFold(decProvider, expected)
+	if onExpected {
+		fmt.Printf("QC OK: %s encoder+decoder reached through pure-Go FFI\n", expected)
 	} else {
 		fmt.Println("QC OK: encoder+decoder reached through pure-Go FFI (CPU fallback, SAM2_ALLOW_CPU=1)")
 	}
