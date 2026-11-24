@@ -58,6 +58,7 @@ The full contract is in [`native/include/sam2_ncnn.h`](native/include/sam2_ncnn.
 
 ```c
 const char*          sam2_get_last_error(void);
+void                 sam2_shutdown(void);
 
 sam2_encoder_t*      sam2_encoder_create(const char* model_path_utf8, int device_id);
 void                 sam2_encoder_destroy(sam2_encoder_t*);
@@ -91,7 +92,10 @@ Important FFI details:
 
 - `sam2_decode_result_t` is 32 bytes on x64; the integer fields are at offsets 16, 20 and 24.
   `example/main.go` verifies this layout before calling the DLL.
-- Release returned handles with their matching `*_destroy` functions.
+- Release returned handles with their matching `*_destroy` functions, then call
+  `sam2_shutdown()` before process exit. This destroys ncnn's global Vulkan instance
+  while the driver is still fully loaded; skipping it can crash NVIDIA drivers during
+  DLL unload. The function is idempotent and is a no-op in CPU-only builds.
 - Creation performs a warmup inference. Calls on the same handle are thread-safe but serialized.
 - Preprocessing is half-pixel bilinear resize to 1024x1024, `/255`, ImageNet normalization
   and NCHW float32 conversion.

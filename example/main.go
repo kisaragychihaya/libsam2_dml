@@ -83,6 +83,7 @@ type sam2lib struct {
 	dll *syscall.LazyDLL
 
 	getLastError *syscall.LazyProc
+	shutdown     *syscall.LazyProc
 
 	encoderCreate   *syscall.LazyProc
 	encoderDestroy  *syscall.LazyProc
@@ -103,6 +104,7 @@ func load(path string) (*sam2lib, error) {
 	}
 	l := &sam2lib{dll: syscall.NewLazyDLL(path)}
 	l.getLastError = l.dll.NewProc("sam2_get_last_error")
+	l.shutdown = l.dll.NewProc("sam2_shutdown")
 	l.encoderCreate = l.dll.NewProc("sam2_encoder_create")
 	l.encoderDestroy = l.dll.NewProc("sam2_encoder_destroy")
 	l.encoderProvider = l.dll.NewProc("sam2_encoder_provider")
@@ -116,6 +118,7 @@ func load(path string) (*sam2lib, error) {
 
 	for name, p := range map[string]*syscall.LazyProc{
 		"sam2_get_last_error":        l.getLastError,
+		"sam2_shutdown":              l.shutdown,
 		"sam2_encoder_create":        l.encoderCreate,
 		"sam2_encoder_destroy":       l.encoderDestroy,
 		"sam2_encoder_provider":      l.encoderProvider,
@@ -479,6 +482,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	defer lib.shutdown.Call()
 	fmt.Printf("cgo              : disabled (pure syscall FFI), sizeof(decodeResult)=%d\n", unsafe.Sizeof(decodeResult{}))
 
 	img, err := loadRGB(imagePath)

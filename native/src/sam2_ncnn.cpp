@@ -281,6 +281,12 @@ void embed_points(const PromptConsts& pc, const float* pts, const int32_t* label
 // ---------------------------------------------------------------------------
 const char* sam2_get_last_error(void) { return g_last_error.c_str(); }
 
+void sam2_shutdown(void) {
+#if SAM2_VULKAN
+    ncnn::destroy_gpu_instance();
+#endif
+}
+
 // ---------------------------------------------------------------------------
 // encoder
 // ---------------------------------------------------------------------------

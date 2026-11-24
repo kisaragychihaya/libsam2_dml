@@ -42,6 +42,13 @@ typedef struct sam2_embedding sam2_embedding_t;
  * this still holds the Vulkan initialization failure reason. */
 SAM2_API const char* sam2_get_last_error(void);
 
+/* Release process-global backend resources before process exit. Call only after
+ * every encoder, decoder, embedding and result handle has been destroyed and no
+ * other thread is calling this library. Safe to call more than once; a no-op in
+ * CPU-only builds. In particular, Go clients must call this before ExitProcess:
+ * destroying the Vulkan instance later during DLL unload can crash NVIDIA drivers. */
+SAM2_API void sam2_shutdown(void);
+
 /* model_path_utf8: UTF-8 path to sam2_encoder_fixed.ncnn.param (the matching
  * .bin must sit next to it). device_id: Vulkan device index when the Vulkan
  * backend is compiled in (CPU build ignores it), 0 = default, must be >= 0.
