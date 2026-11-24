@@ -77,6 +77,7 @@ jobs:
           git -C native/third_party/ncnn-src remote add origin https://github.com/Tencent/ncnn
           git -C native/third_party/ncnn-src fetch --quiet --depth 1 origin $env:NCNN_TAG
           git -C native/third_party/ncnn-src checkout --quiet FETCH_HEAD
+          git -C native/third_party/ncnn-src submodule update --init --recursive --depth 1
           cmake -S native/third_party/ncnn-src -B native/third_party/ncnn-build -G Ninja `
             -DCMAKE_BUILD_TYPE=Release `
             -DNCNN_VULKAN=ON `
