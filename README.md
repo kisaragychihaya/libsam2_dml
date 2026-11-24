@@ -134,6 +134,15 @@ The Vulkan path uses fp32 storage and arithmetic for numerical stability. If no 
 Vulkan device is available, creation succeeds on Cpu and `sam2_get_last_error()` explains
 the fallback.
 
+## Known issues
+
+- **Vulkan multi-point prompts return a near-empty mask** ([#1](https://github.com/kisaragychihaya/libsam2_ncnn/issues/1)):
+  decoding against one embedding works with a single point (IoU 0.917 on the QC image)
+  but a two-point prompt binarizes to a handful of pixels (66/65536 on the same image);
+  the Cpu build is correct in both cases. The QC gate only prompts with one point, so
+  it does not catch this. Until fixed, prompt with a single point on Vulkan builds or
+  use the Cpu build for multi-point prompting.
+
 ## Releases
 
 Pushing a `v*` tag starts the build-and-QC workflow. When both backend jobs pass, the
