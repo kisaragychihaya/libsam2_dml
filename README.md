@@ -140,8 +140,11 @@ the fallback.
   decoding against one embedding works with a single point (IoU 0.917 on the QC image)
   but a two-point prompt binarizes to a handful of pixels (66/65536 on the same image);
   the Cpu build is correct in both cases. The QC gate only prompts with one point, so
-  it does not catch this. Until fixed, prompt with a single point on Vulkan builds or
-  use the Cpu build for multi-point prompting.
+  it does not catch this. **Workaround**: set `SAM2_DEC_PROVIDER=cpu` before creating
+  the decoder to keep the encoder on Vulkan while the decoder net runs on Cpu — the
+  bug is in the decoder's Vulkan execution, the decoder is the cheap half of the
+  pipeline, and the Cpu decoder is correct for any number of points. Unset, the
+  decoder follows `configure_net` as before (Vulkan with Cpu fallback).
 
 ## Releases
 
