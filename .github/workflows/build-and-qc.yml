@@ -22,6 +22,10 @@ on:
         type: boolean
         required: false
         default: true
+      version:
+        description: Dist zip suffix, i.e. dist-<version>.zip (empty = git describe --tags)
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -38,6 +42,9 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Full history so git describe --tags can name the dist zip.
+          fetch-depth: 0
 
       - uses: actions/setup-go@v5
         with:
@@ -216,19 +223,28 @@ jobs:
             Stop-Transcript | Out-Null
           }
 
+      - name: Package dist zip (exe + DLLs)
+        if: always()
+        shell: pwsh
+        env:
+          VERSION_INPUT: ${{ inputs.version }}
+        run: |
+          $version = "$env:VERSION_INPUT"
+          if (-not $version) { $version = git describe --tags --always }
+          $zip = "dist-$version.zip"
+          "DIST_ZIP=$zip" | Add-Content -Path $env:GITHUB_ENV
+          # Missing bin\ means an early build failure; leave the zip absent so
+          # the upload step warns, same as the old per-file behavior.
+          if (Test-Path bin/sam2qc.exe) {
+            New-Item -ItemType Directory -Force package/bin | Out-Null
+            Copy-Item bin/sam2qc.exe, bin/sam2_dml.dll, bin/onnxruntime.dll, bin/DirectML.dll package/bin
+            Compress-Archive -Path package/* -DestinationPath $zip -Force
+          }
+
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: sam2_dml-win-x64-qc
           if-no-files-found: warn
-          path: |
-            bin/sam2qc.exe
-            bin/sam2_dml.dll
-            bin/onnxruntime.dll
-            bin/DirectML.dll
-            example/out/qc_output.log
-            example/out/compare_output.log
-            example/out/mask_output.png
-            example/out/test_image.png
-            native/build.log
+          path: ${{ env.DIST_ZIP }}

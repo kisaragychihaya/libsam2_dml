@@ -215,8 +215,9 @@ binary IoU between Go and Python masks 1.0.
 ORT-DML, builds the DLL with MSVC + CMake + Ninja, builds the Go client with `CGO_ENABLED=0`,
 downloads both models (URLs are inputs, defaults point at this repo's `v0.1.0` assets), generates
 the synthetic image, runs the QC pass, asserts `DmlExecutionProvider`, then runs `ref_dump.py` +
-`compare.py` with `atol=1e-3` (a failing comparison fails the job) and uploads the DLLs, exe, logs
-and mask PNG as an artifact. Inputs: `encoder_url`, `decoder_url`, `runs` (default 2), `require_dml`
+`compare.py` with `atol=1e-3` (a failing comparison fails the job) and uploads a single
+`dist-<version>.zip` artifact containing just `bin/` (exe + DLLs). Inputs: `encoder_url`, `decoder_url`,
+`runs` (default 2), `require_dml`, `version` (zip suffix; empty defaults to `git describe --tags`)
 (default true — a DirectML fallback to CPU fails the job rather than silently passing). Before the QC
 pass it inventories the runner's display adapters and probes `SAM2_DEVICE=0..3`, so a DirectML device
 reachable only at another adapter index is still found.
