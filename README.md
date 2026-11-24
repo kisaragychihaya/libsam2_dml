@@ -140,11 +140,11 @@ the fallback.
   decoding against one embedding works with a single point (IoU 0.917 on the QC image)
   but a two-point prompt binarizes to a handful of pixels (66/65536 on the same image);
   the Cpu build is correct in both cases. The QC gate only prompts with one point, so
-  it does not catch this. **Workaround**: set `SAM2_DEC_PROVIDER=cpu` before creating
-  the decoder to keep the encoder on Vulkan while the decoder net runs on Cpu — the
-  bug is in the decoder's Vulkan execution, the decoder is the cheap half of the
-  pipeline, and the Cpu decoder is correct for any number of points. Unset, the
-  decoder follows `configure_net` as before (Vulkan with Cpu fallback).
+  it does not catch this. **Mitigation**: the decoder net is pinned to Cpu in every
+  build (the encoder keeps its configured backend), so multi-point prompts are
+  correct everywhere; the cost is decode at Cpu speed (~75ms vs ~38ms for the
+  small model), while the encoder — the expensive half — still uses Vulkan when
+  available.
 
 ## Releases
 
@@ -188,7 +188,6 @@ unless `CROSSCHECK=0`, compares the logits with the Python reference.
 | `SAM2_RUNS` | Timed iterations per stage | `5` |
 | `SAM2_EXPECT` | Required provider substring, `Cpu` or `Vulkan` | `Cpu` |
 | `SAM2_ALLOW_CPU` | Warn instead of failing when Vulkan falls back to Cpu | unset |
-| `SAM2_DEC_PROVIDER` | `cpu` forces the decoder net onto Cpu even in Vulkan builds (works around the multi-point Vulkan bug, see Known issues); `vulkan` requests the GPU | unset (follows the build's backend) |
 | `SAM2_REF_LOGITS` | Existing PyTorch reference for a custom QC image | checked-in reference for the synthetic image |
 | `SAM2_CHECKPOINT` | SAM2 checkpoint used to generate a custom-image reference | `sam2_hiera_small.pt` in the repository root |
 
