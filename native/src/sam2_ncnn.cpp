@@ -454,14 +454,8 @@ sam2_decoder_t* sam2_decoder_create(const char* model_path_utf8, int device_id) 
         if (!load_prompt_consts(dir_of(model_path_utf8) + "sam2_prompt.bin", dec->pc)) {
             return nullptr;
         }
-        // The decoder net is pinned to the Cpu backend in every build. Its
-        // Vulkan execution corrupts multi-point prompts (README "Known
-        // issues"), and the decoder is the cheap half of the pipeline, so Cpu
-        // costs little (decode ~75ms vs ~38ms) while staying correct for any
-        // number of points. The encoder keeps configure_net's backend.
-        dec->net.opt.use_packing_layout = false;
-        dec->net.opt.use_vulkan_compute = false;
-        dec->provider = kProviderCpu;
+        std::string fallback_reason;
+        configure_net(dec->net, device_id, dec->provider, fallback_reason);
         if (dec->net.load_param(model_path_utf8) != 0 ||
             dec->net.load_model(bin_path.c_str()) != 0) {
             set_error(std::string("sam2_decoder_create: failed to load ") +
@@ -485,8 +479,8 @@ sam2_decoder_t* sam2_decoder_create(const char* model_path_utf8, int device_id) 
             sam2_decoder_decode(dec.get(), &dummy, pt, lbl, 1));
         if (warm == nullptr) return nullptr;
         sam2_decode_result_destroy(warm.release());
-        // The decoder is Cpu-only (see above): no Vulkan fallback to explain.
-        clear_error();
+        if (dec->provider == kProviderPrimary) clear_error();
+        else if (!fallback_reason.empty()) set_error(fallback_reason);
         return dec.release();
     } catch (const std::exception& e) {
         set_error(std::string("sam2_decoder_create: ") + e.what());

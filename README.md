@@ -136,15 +136,17 @@ the fallback.
 
 ## Known issues
 
-- **Vulkan multi-point prompts return a near-empty mask** ([#1](https://github.com/kisaragychihaya/libsam2_ncnn/issues/1)):
-  decoding against one embedding works with a single point (IoU 0.917 on the QC image)
-  but a two-point prompt binarizes to a handful of pixels (66/65536 on the same image);
-  the Cpu build is correct in both cases. The QC gate only prompts with one point, so
-  it does not catch this. **Mitigation**: the decoder net is pinned to Cpu in every
-  build (the encoder keeps its configured backend), so multi-point prompts are
-  correct everywhere; the cost is decode at Cpu speed (~75ms vs ~38ms for the
-  small model), while the encoder — the expensive half — still uses Vulkan when
-  available.
+- **Vulkan multi-point prompts depend on dynamic-shape decoder parameters**:
+  decoder params traced from a one-point example kept fixed token dimensions, so
+  older Vulkan builds specialized the wrong shape for two or more points. Current
+  decoder assets mark the token-path Gemm dimensions with `constantM=0` and infer
+  token-count-dependent Reshape dimensions, allowing both encoder and decoder to
+  use the configured Vulkan backend for any number of points.
+
+- **Vulkan raw logits can slightly exceed the fp32 CPU/PyTorch gate**: on the
+  synthetic QC image the max absolute difference is `2.239e-02` (`7` of `65536`
+  elements over `2e-2`), while the binarized mask IoU remains `1.0`. This is a
+  known Vulkan floating-point difference, not a shape or mask regression.
 
 ## Releases
 
